@@ -1,0 +1,54 @@
+{
+  "process": "mess3",
+  "seed": 0,
+  "model": {
+    "d_vocab": 3,
+    "n_layers": 4,
+    "d_model": 64,
+    "n_heads": 1,
+    "d_head": 8,
+    "d_mlp": 256,
+    "n_ctx": 10,
+    "act_fn": "relu",
+    "normalization_type": "LN",
+    "attention_dir": "causal",
+    "positional_embedding_type": "standard",
+    "seed": 0
+  },
+  "training": {
+    "optimizer": "adam",
+    "lr": 0.001,
+    "batch_size": 1024,
+    "n_steps": 10000,
+    "final_loss_nats": 0.8039875388145447,
+    "optimal_in_context_loss_nats": 0.8035975788667931,
+    "loss_gap_to_floor_nats": 0.0003899599477515947,
+    "entropy_rate_bits": 1.1448871659889368,
+    "entropy_rate_nats": 0.7935753111644976
+  },
+  "probe": {
+    "hook": "resid_post",
+    "n_fit_positions": 40000,
+    "n_test_positions": 40000,
+    "headline_layer": 3,
+    "r2_headline_layer": 0.9885974859413357,
+    "r2_per_coord_headline": [
+      0.9882760948426466,
+      0.9885531106146034,
+      0.9889632523667574
+    ],
+    "r2_per_layer": {
+      "0": 0.9884472624228188,
+      "1": 0.988720841763039,
+      "2": 0.9884314296245152,
+      "3": 0.9885974859413357
+    },
+    "best_layer": 1,
+    "r2_best_layer": 0.988720841763039
+  },
+  "figures": {
+    "headline": "results/mess3_headline.png",
+    "training_curve": "results/mess3_training_curve.png",
+    "layer_r2": "results/mess3_layer_r2.png"
+  }
+}
