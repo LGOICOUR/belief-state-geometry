@@ -1,0 +1,53 @@
+{
+  "process": "rrxor",
+  "seed": 0,
+  "model": {
+    "d_vocab": 2,
+    "n_layers": 4,
+    "d_model": 64,
+    "n_heads": 1,
+    "d_head": 8,
+    "d_mlp": 256,
+    "n_ctx": 10,
+    "act_fn": "relu",
+    "normalization_type": "LN",
+    "attention_dir": "causal",
+    "positional_embedding_type": "standard",
+    "seed": 0
+  },
+  "training": {
+    "optimizer": "adam",
+    "lr": 0.001,
+    "batch_size": 1024,
+    "n_steps": 50000,
+    "final_loss_nats": 0.5868359088897706,
+    "optimal_in_context_loss_nats": 0.5865107987396838,
+    "loss_gap_to_floor_nats": 0.00032511015008673816,
+    "entropy_rate_bits": 0.6666666666666665
+  },
+  "probe": {
+    "hook": "resid_post",
+    "ridge_alpha": 1.0,
+    "n_test_positions": 80000,
+    "r2_per_layer": {
+      "0": 0.40055578678035025,
+      "1": 0.4734148614454973,
+      "2": 0.5536254441304342,
+      "3": 0.6126169348254079
+    },
+    "best_single_layer": 3,
+    "r2_best_single_layer": 0.6126169348254079,
+    "r2_concat_all_layers": 0.8169158622880399,
+    "concat_beats_best_single_layer": true
+  },
+  "future_information": {
+    "r2_residual_to_belief": 0.8169158622880399,
+    "r2_nexttoken_dist_to_belief": 0.2747788499644057,
+    "interpretation": "The residual stream linearly encodes the belief far better than the next-token distribution can (a many-to-one function of belief), so it carries information about the whole future, not just the next token."
+  },
+  "figures": {
+    "layer_r2": "results/rrxor_layer_r2.png",
+    "pred_vs_true": "results/rrxor_pred_vs_true.png",
+    "future_information": "results/rrxor_future_information.png"
+  }
+}
