@@ -1,0 +1,50 @@
+[project]
+name = "belief-state-geometry"
+version = "0.1.0"
+description = "From-scratch replication of belief-state geometry in transformer residual streams (Shai et al. 2024, arXiv:2405.15943)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Luis Goicouria" }]
+
+# Runtime dependencies. Lower bounds chosen for known compatibility; uv.lock pins
+# the exact resolved versions for reproducibility (commit uv.lock to the repo).
+dependencies = [
+    "torch>=2.2,<2.6",
+    "transformer-lens>=2.0,<3.0",
+    # transformer_lens 2.15.x declares transformers>=4.43 with NO upper bound, but
+    # transformers 5.x removed transformers.TRANSFORMERS_CACHE which TL imports at
+    # load time. Pin to a stable late-4.x release contemporary with TL 2.15.4.
+    "transformers>=4.44,<4.49",
+    "numpy>=1.24,<2.0",
+    "scikit-learn>=1.3",
+    "einops>=0.7",
+    "matplotlib>=3.7",
+    "tqdm>=4.66",
+]
+
+# Dev + notebook tooling. uv installs the `dev` group by default on `uv sync`.
+[dependency-groups]
+dev = [
+    "pytest>=7.4",
+    "jupyter>=1.0",
+    "ipykernel>=6.29",
+    "nbconvert>=7.10",
+    "nbformat>=5.9",
+]
+
+# No [build-system]: this is a "virtual" uv project. uv installs the dependencies
+# into .venv but does not try to build/install our own code as a wheel. The `src/`
+# modules are made importable three ways, with no per-file path hacks needed:
+#   - scripts:  `uv run python src/train.py`  (Python auto-adds the script's dir, src/, to sys.path)
+#   - tests:    pytest's `pythonpath = ["src"]` below
+#   - notebooks: an explicit, commented `sys.path.insert(0, "../src")` in cell 1
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.uv]
+# Use only binary wheels where possible to avoid slow/fragile source builds.
+# (Remove if a platform needs an sdist.)

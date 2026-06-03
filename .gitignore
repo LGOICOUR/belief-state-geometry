@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual env / uv
+.venv/
+
+# NOTE: the trained checkpoints in checkpoints/*.pt are intentionally committed —
+# they are tiny (~600 KB each), so notebooks and figures reproduce instantly
+# without a multi-minute retrain. Re-create them with `python src/train.py`.
+
+# OS
+.DS_Store
+
+# Jupyter
+notebooks/*.nbconvert.ipynb
