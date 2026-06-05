@@ -247,6 +247,46 @@ def plot_future_information(fi: dict, title=None, save_path=None, max_points=80_
     return fig
 
 
+def plot_generator_decodability(
+    positions, model_acc, upper_acc, horizon, epoch_len,
+    title=None, save_path=None,
+):
+    """Accuracy of decoding the *first* epoch's generator label vs token position.
+
+    The first epoch's Z is revealed at its first indicator (position ``horizon``)
+    and remains in the raw history afterwards (upper-bound curve). In later epochs
+    it is neither in the current input nor predictively needed, so the model's
+    accuracy there measures **retention**: tracking the upper bound = the model
+    keeps predictively-useless identity; dropping to chance = it discards it.
+    """
+    positions = np.asarray(positions)
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    n_ep = (len(positions) + epoch_len - 1) // epoch_len
+    if n_ep > 1:  # shade everything after the first epoch (the retention region)
+        ax.axvspan(epoch_len - 0.5, len(positions) - 0.5, color="C0", alpha=0.07,
+                   label="retention region (epoch ≥ 2)")
+    for e in range(1, n_ep):
+        ax.axvline(e * epoch_len - 0.5, color="0.85", lw=1)
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax.plot(positions, upper_acc, color="k", ls="--", lw=1.4, marker="s", ms=4,
+            label="upper bound (label is in history)")
+    ax.plot(positions, model_acc, color="C3", lw=2, marker="o", ms=5,
+            label="model residual (linear probe)")
+    ax.axvline(horizon, color="C2", lw=1.2, ls="-.", alpha=0.7,
+               label=f"reveal (position {horizon})")
+    ax.set_xlabel("token position")
+    ax.set_ylabel("decode first-epoch generator (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_xticks(list(positions))
+    ax.set_title(title or "Mixture: where is the generator label represented?")
+    ax.legend(fontsize=8.5, loc="lower left", ncol=2)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
 def _save(fig, save_path, dark=False):
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)

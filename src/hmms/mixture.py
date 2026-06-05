@@ -147,3 +147,21 @@ class MixtureProcess(Process):
         returns shape ``[...]`` (a scalar for a single belief)."""
         belief = np.asarray(belief, dtype=np.float64)
         return belief[..., self._gen_a_mask].sum(axis=-1)
+
+    def epoch_start_belief(self) -> np.ndarray:
+        """Optimal belief at an epoch boundary: 1/2 on each generator's first state.
+
+        This is the correct prior for *epoch-aligned* analysis (the observer knows
+        the phase from absolute position), as opposed to the stationary prior which
+        also averages over phase uncertainty.
+        """
+        b = np.zeros(self.n_states)
+        b[self.epoch_start_states[GEN_A]] = 0.5
+        b[self.epoch_start_states[GEN_B]] = 0.5
+        return b
+
+    def aligned_init_states(self, n_seqs: int, rng: np.random.Generator) -> np.ndarray:
+        """Initial hidden states for epoch-aligned sampling: a fair coin over the
+        two generators' epoch-start states, so every sequence begins a fresh epoch
+        and within-epoch phase equals ``position % epoch_len``."""
+        return rng.choice(self.epoch_start_states, size=n_seqs)

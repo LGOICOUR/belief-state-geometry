@@ -60,9 +60,15 @@ def sample_tokens(
     seq_len: int,
     rng: np.random.Generator,
     device: str | torch.device = "cpu",
+    init_states=None,
 ) -> torch.Tensor:
-    """Sample ``[n_seqs, seq_len]`` integer token tensor from the process."""
-    em = process.sample_batch(n_seqs, seq_len, rng)
+    """Sample ``[n_seqs, seq_len]`` integer token tensor from the process.
+
+    ``init_states`` (optional, shape ``[n_seqs]``) seeds the hidden state of each
+    sequence; defaults to draws from the stationary distribution. The Phase-2
+    mixture uses it for epoch-aligned sampling.
+    """
+    em = process.sample_batch(n_seqs, seq_len, rng, init_states=init_states)
     return torch.as_tensor(em, dtype=torch.long, device=device)
 
 
@@ -97,3 +103,54 @@ def make_eval_set(
     beliefs = process.belief_trajectory(em)  # [n_seqs, seq_len, n_states]
     tokens = torch.as_tensor(em, dtype=torch.long, device=device)
     return EvalData(tokens=tokens, beliefs=beliefs, emissions=em)
+
+
+# --------------------------------------------------------------------- #
+# Phase 2: epoch-aligned eval set for the mixture process
+# --------------------------------------------------------------------- #
+@dataclass
+class MixtureEvalData:
+    """Held-out set for the mixture experiments.
+
+    Attributes
+    ----------
+    tokens:       ``[n_seqs, seq_len]`` LongTensor (on device).
+    z_labels:     ``[n_seqs, seq_len]`` int; the generator (0=A, 1=B) of the epoch
+                  each position belongs to (ground truth from the hidden-state path).
+    gen_marginal: ``[n_seqs, seq_len]`` float; the optimal observer's
+                  ``P(Z=A | history)`` after each token (epoch-aligned prior).
+    emissions:    ``[n_seqs, seq_len]`` numpy copy of the tokens.
+    """
+
+    tokens: torch.Tensor
+    z_labels: np.ndarray
+    gen_marginal: np.ndarray
+    emissions: np.ndarray
+
+    @property
+    def z_first(self) -> np.ndarray:
+        """The first epoch's generator label, one per sequence (for retention probes)."""
+        return self.z_labels[:, 0]
+
+
+def make_mixture_eval_set(process, n_seqs, seq_len, seed, device="cpu") -> MixtureEvalData:
+    """Sample an *epoch-aligned* held-out set for the mixture process.
+
+    Every sequence starts at an epoch boundary (so within-epoch phase equals
+    ``position % epoch_len``). Attaches both the ground-truth generator label per
+    position (from the hidden-state path) and the optimal observer's generator
+    marginal (from the epoch-aligned belief trajectory). Requires a process with
+    ``aligned_init_states``, ``generator_of_state``, ``generator_marginal`` and
+    ``epoch_start_belief`` (i.e. a :class:`hmms.MixtureProcess`).
+    """
+    rng = np.random.default_rng(seed)
+    init = process.aligned_init_states(n_seqs, rng)
+    em, states = process.sample_batch(
+        n_seqs, seq_len, rng, init_states=init, return_states=True
+    )
+    z_labels = process.generator_of_state[states[:, :seq_len]]  # gen of the emitter of each token
+    beliefs = process.belief_trajectory(em, start=process.epoch_start_belief())
+    gen_marginal = process.generator_marginal(beliefs)          # [n_seqs, seq_len]
+    tokens = torch.as_tensor(em, dtype=torch.long, device=device)
+    return MixtureEvalData(tokens=tokens, z_labels=z_labels,
+                           gen_marginal=gen_marginal, emissions=em)

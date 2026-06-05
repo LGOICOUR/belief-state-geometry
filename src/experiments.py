@@ -16,17 +16,19 @@ import numpy as np
 import torch
 
 import beliefs as B
-from data import make_eval_set, get_device, sample_tokens
-from hmms import Mess3, RRXOR
+from data import make_eval_set, make_mixture_eval_set, get_device, sample_tokens
+from hmms import Mess3, RRXOR, MixtureProcess
+from model import ArchConfig
 from probe import (
     ProbeResult,
     cache_residuals,
     flatten_beliefs,
     probe_all_layers,
     probe_concat_layers,
+    probe_label_by_position,
     best_layer,
 )
-from train import load_checkpoint
+from train import load_checkpoint, train, save_checkpoint, TrainConfig
 import viz
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -342,4 +344,143 @@ def future_information_analysis(
         "r2_nexttoken_to_belief": r2_nexttoken_to_belief,
         "d_belief": d_belief,
         "d_nexttok": d_nexttok,
+    }
+
+
+# ====================================================================== #
+# Phase 2: mixture process (belief-state collapse / retention)
+# ====================================================================== #
+def _mixture_floor_nats(process, seq_len, seed=999, n=30000):
+    """Epoch-aligned optimal in-context loss (nats): the apt floor for this model.
+
+    Like ``beliefs.optimal_in_context_loss`` but seeded at epoch boundaries and
+    using the epoch-aligned prior, matching how the mixture model is trained/evaluated.
+    """
+    rng = np.random.default_rng(seed)
+    init = process.aligned_init_states(n, rng)
+    em = process.sample_batch(n, seq_len, rng, init_states=init)
+    bel = process.belief_trajectory(em, start=process.epoch_start_belief())
+    nd = np.einsum("bli,xij->blx", bel, process.T)        # P(next | belief)
+    H = B.entropy(nd[:, :-1, :], axis=2, units="nats")    # predict t+1 from belief after t
+    return float(H.mean())
+
+
+@torch.no_grad()
+def _eval_aligned_loss(model, process, seq_len, device, n=8192):
+    """Held-out next-token loss (nats) on epoch-aligned sequences."""
+    rng = np.random.default_rng(777)
+    init = process.aligned_init_states(n, rng)
+    tok = sample_tokens(process, n, seq_len, rng, device, init_states=init)
+    model.eval()
+    return float(model(tok, return_type="loss").item())
+
+
+def run_mixture_experiment(
+    horizon: int = 2,
+    tail: int = 2,
+    n_ctx: int = 8,
+    n_steps: int = 8000,
+    n_fit: int = 6000,
+    n_test: int = 6000,
+    seed: int = 0,
+    device=None,
+    checkpoint_path=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Smallest end-to-end mixture experiment (retention probe).
+
+    Trains an epoch-aligned mixture model, then decodes the *first* epoch's
+    generator label from the residual stream at every position. Accuracy is at
+    chance before the reveal, high once the indicator is in the input, and -- in
+    epoch >= 2, where that label is neither in the input nor predictively needed --
+    measures **retention**: pure predictive sufficiency would discard it (chance),
+    extra mechanistic memory would keep it (near the upper bound).
+    """
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = process.epoch_len
+
+    # --- train (or load) ---
+    if checkpoint_path is not None and Path(checkpoint_path).exists():
+        model, ckpt = load_checkpoint(checkpoint_path, device)
+        history = ckpt.get("history", {"step": [], "loss": []})
+        ent_bits = ckpt.get("entropy_rate_bits", float("nan"))
+    else:
+        arch = ArchConfig.paper(process, n_ctx=n_ctx, seed=seed)
+        cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=n_steps, seed=seed)
+        result = train(process, arch, cfg, init_states_fn=process.aligned_init_states,
+                       process_name=f"mixture(h={horizon},tail={tail})")
+        model, history, ent_bits = result.model, result.history, result.entropy_rate_bits
+        if save:
+            out = checkpoint_path or (REPO_ROOT / "checkpoints" / f"mixture_h{horizon}_t{tail}.pt")
+            save_checkpoint(result, out)
+
+    floor = _mixture_floor_nats(process, n_ctx, seed=seed + 999)
+    held_loss = _eval_aligned_loss(model, process, n_ctx, device)
+
+    # --- retention probe: decode the first epoch's generator label by position ---
+    fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+    test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+    positions, model_acc = probe_label_by_position(
+        model, fit.tokens, fit.z_first, test.tokens, test.z_first
+    )
+    upper_acc = np.array([1.0 if p >= horizon else 0.5 for p in positions])
+
+    prefix = model_acc[:horizon]            # before reveal (control: ~0.5)
+    revealed = model_acc[horizon:epoch_len]  # epoch 1 after reveal (~1.0)
+    retention = model_acc[epoch_len:]        # epoch >= 2 (the result)
+    retention_mean = float(retention.mean()) if retention.size else float("nan")
+
+    figures = {}
+    fig_dec = viz.plot_generator_decodability(
+        positions, model_acc, upper_acc, horizon, epoch_len,
+        title=f"Mixture (horizon={horizon}, tail={tail}): generator label by position",
+        save_path=results_dir / "mixture_decodability.png" if save else None,
+    )
+    figures["decodability"] = _rel(results_dir / "mixture_decodability.png")
+    fig_curve = viz.plot_training_curve(
+        history, floor, ent_bits, title="Mixture: training loss vs analytic floor",
+        save_path=results_dir / "mixture_training_curve.png" if save else None,
+    )
+    figures["training_curve"] = _rel(results_dir / "mixture_training_curve.png")
+
+    metrics = {
+        "process": f"mixture(h={horizon},tail={tail})",
+        "seed": seed,
+        "config": {"horizon": horizon, "tail": tail, "epoch_len": epoch_len, "n_ctx": n_ctx},
+        "training": {
+            "final_loss_nats": held_loss,
+            "optimal_in_context_loss_nats": floor,
+            "loss_gap_to_floor_nats": held_loss - floor,
+            "entropy_rate_bits": ent_bits,
+        },
+        "retention_probe": {
+            "accuracy_by_position": [round(float(a), 4) for a in model_acc],
+            "upper_bound_by_position": [float(a) for a in upper_acc],
+            "mean_prefix_accuracy": float(prefix.mean()) if prefix.size else None,
+            "mean_revealed_accuracy": float(revealed.mean()) if revealed.size else None,
+            "mean_retention_accuracy": retention_mean,
+            "interpretation": (
+                "First-epoch generator label decoded from the residual at each position. "
+                "Chance (~0.5) before the reveal; ~1.0 once the indicator is in the input. "
+                "In epoch >= 2 the label is neither in the current input nor predictively "
+                f"needed, so the retention accuracy ({retention_mean:.3f}) is the result: "
+                "~0.5 = discards predictively-useless identity (pure predictive sufficiency); "
+                "near the upper bound = retains it (extra mechanistic memory)."
+            ),
+        },
+        "figures": figures,
+    }
+    if save:
+        _write_metrics(metrics, results_dir / "metrics_mixture.json")
+
+    return {
+        "metrics": metrics,
+        "positions": positions,
+        "model_acc": model_acc,
+        "upper_acc": upper_acc,
+        "figures": {"decodability": fig_dec, "training_curve": fig_curve},
+        "model": model,
+        "process": process,
     }

@@ -103,11 +103,12 @@ def _make_optimizer(model, cfg: TrainConfig):
 
 
 @torch.no_grad()
-def _eval_loss(model, process, cfg, device, n_seqs=4096) -> float:
+def _eval_loss(model, process, cfg, device, n_seqs=4096, init_states_fn=None) -> float:
     """Mean next-token loss on a fresh (held-out) batch."""
     model.eval()
     rng = np.random.default_rng(20240524)  # fixed eval seed, disjoint draws
-    tokens = sample_tokens(process, n_seqs, cfg.seq_len, rng, device)
+    init = init_states_fn(n_seqs, rng) if init_states_fn is not None else None
+    tokens = sample_tokens(process, n_seqs, cfg.seq_len, rng, device, init_states=init)
     loss = model(tokens, return_type="loss").item()
     model.train()
     return loss
@@ -119,7 +120,11 @@ def train(
     train_cfg: TrainConfig | None = None,
     verbose: bool = True,
     process_name: str | None = None,
+    init_states_fn=None,
 ) -> TrainResult:
+    """Train next-token prediction. ``init_states_fn(n_seqs, rng) -> [n_seqs]`` lets
+    a process seed each batch's hidden states (the mixture uses it for epoch-aligned
+    sampling); default None seeds from the stationary distribution."""
     train_cfg = train_cfg or TrainConfig.fast()
     arch = arch or ArchConfig.paper(process, seed=train_cfg.seed)
     device = get_device(train_cfg.device)
@@ -146,7 +151,9 @@ def train(
     t0 = time.time()
     running = 0.0
     for step in range(1, train_cfg.n_steps + 1):
-        tokens = sample_tokens(process, train_cfg.batch_size, train_cfg.seq_len, rng, device)
+        init = init_states_fn(train_cfg.batch_size, rng) if init_states_fn is not None else None
+        tokens = sample_tokens(process, train_cfg.batch_size, train_cfg.seq_len, rng, device,
+                               init_states=init)
         loss = model(tokens, return_type="loss")
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -166,11 +173,11 @@ def train(
                 print(f"  step {step:>7d} | loss {avg:.4f} nats | gap to floor {gap:+.4f} "
                       f"| {rate:.0f} it/s")
         if train_cfg.eval_every and step % train_cfg.eval_every == 0:
-            el = _eval_loss(model, process, train_cfg, device)
+            el = _eval_loss(model, process, train_cfg, device, init_states_fn=init_states_fn)
             history["eval_step"].append(step)
             history["eval_loss"].append(el)
 
-    final = _eval_loss(model, process, train_cfg, device)
+    final = _eval_loss(model, process, train_cfg, device, init_states_fn=init_states_fn)
     if verbose:
         print(f"[train] done in {time.time()-t0:.1f}s | final held-out loss "
               f"{final:.4f} nats (floor {floor:.4f}, gap {final-floor:+.4f})")

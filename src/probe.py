@@ -23,8 +23,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.metrics import r2_score
+from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
+from sklearn.metrics import r2_score, accuracy_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 import beliefs as B
 from data import EvalData
@@ -163,3 +165,36 @@ def simplex_points(result: ProbeResult):
     pred_xy = B.project_to_simplex_2d(result.y_pred)
     rgb = B.belief_to_rgb(result.y_true)
     return true_xy, pred_xy, rgb
+
+
+# --------------------------------------------------------------------- #
+# Phase 2: position-resolved decoding of a per-sequence label
+# --------------------------------------------------------------------- #
+def _residuals_3d(model, tokens, hook="resid_post", layers=None) -> np.ndarray:
+    """Cache residuals and reshape to ``[n_seqs, seq_len, d_total]`` (layers concatenated)."""
+    N, L = tokens.shape
+    cached = cache_residuals(model, tokens, hook, layers)
+    X = np.concatenate([cached[l] for l in sorted(cached)], axis=1)  # [N*L, d_total]
+    return X.reshape(N, L, -1)
+
+
+def probe_label_by_position(model, fit_tokens, fit_y, test_tokens, test_y,
+                            hook="resid_post", layers=None):
+    """Decode a per-sequence binary label from the residual at each position.
+
+    Fits an independent linear (logistic) probe at each token position and returns
+    held-out classification accuracy vs. position. For the mixture retention probe
+    we decode the *first* epoch's generator label across the whole sequence:
+    accuracy stays high only where that label is actually represented, so the
+    second-epoch positions (where it is neither in the input nor predictively
+    needed) measure retention. Activations are concatenated across layers.
+    """
+    Xf = _residuals_3d(model, fit_tokens, hook, layers)
+    Xt = _residuals_3d(model, test_tokens, hook, layers)
+    L = Xf.shape[1]
+    acc = np.empty(L)
+    for p in range(L):
+        clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000))
+        clf.fit(Xf[:, p, :], fit_y)
+        acc[p] = accuracy_score(test_y, clf.predict(Xt[:, p, :]))
+    return np.arange(L), acc
