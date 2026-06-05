@@ -1,9 +1,10 @@
 # Phase 2 — Belief-State Collapse in Mixture Processes
 
-> **Status: design / proposal.** This document specifies the Phase 2 experiment.
-> No Phase 2 code is implemented yet; the abstractions in `src/` were built to
-> accommodate it without rewrites (see §7). Phase 1 (the Mess3 / RRXOR
-> replication) is complete on `main`.
+> **Status: design + P0 implemented.** This document specifies the Phase 2
+> experiment; the process construction (P0) is built and tested in
+> `src/hmms/mixture.py` / `tests/test_mixture.py`. The remaining milestones (P1–P5)
+> are not built yet. Phase 1 (Mess3 / RRXOR) is complete on `main`; Phase 2 lives
+> on branch `phase2/mixture-collapse`.
 
 ## Abstract
 
@@ -45,40 +46,53 @@ discard, which is what makes this an experiment rather than a demonstration.
 ## 1. The process family (the construction)
 
 A **mixture process** parameterized by a divergence horizon `i`. The stream is a
-sequence of fixed-length **epochs** of length `i + 1`. Each epoch:
+sequence of fixed-length **epochs** of length `i + tail` (default `tail = 2`).
+Each epoch:
 
 1. Draw a latent fair coin `Z ∈ {A, B}` (fresh each epoch).
-2. Positions `1…i`: emit `i` uniform random bits `b₁ … bᵢ` (identical under A and B).
-3. Position `i + 1` (the **reveal**): emit `r`, where
-   - `r = b₁`     if `Z = A`
-   - `r = 1 − b₁` if `Z = B`.
+2. Positions `1…i`: emit `i` uniform random bits (identical under A and B).
+3. Positions `i+1 … i+tail` (the **divergent tail**): emit `Z`'s **indicator**
+   bit, deterministically — `0` if `Z = A`, `1` if `Z = B`.
+
+At the epoch boundary `Z` is resampled.
 
 **Predictive-equivalence property.** For positions `1…i` the next-bit
-distribution is uniform regardless of `Z`, so generators A and B are
-statistically indistinguishable from observations. `Z` is independent of
-`(b₁ … bᵢ)`. At position `i + 1` the reveal bit equals `b₁` under A and its
-complement under B; since the observer has already seen `b₁`, the reveal pins down
-`Z` with certainty. **Predictive equivalence breaks exactly at step `i + 1`.**
+distribution is uniform regardless of `Z`, so A and B are statistically
+indistinguishable and `Z` is independent of the observed prefix. At position
+`i + 1` (the first indicator) A emits `0` and B emits `1`: **predictive
+equivalence breaks exactly at step `i + 1`.**
 
-**As an HMM.** The hidden state is `(Z, position-in-epoch, b₁)` — `b₁` must be
-remembered to produce the reveal — so roughly `4(i + 1)` states, built
-programmatically as a labeled transition tensor `T` and handed to `Process`.
+**Why `tail ≥ 2` and not a single reveal.** This is the one subtlety that
+matters, and building the construction is what surfaces it. If the divergence
+were a *single* token at `i + 1` that also ended the epoch, `Z` would become
+predictively irrelevant the instant it is revealed — so the optimal belief would
+never actually *commit* to it. There would be no regime where representing `Z`
+is predictively *necessary*, only the question of whether the model *retains* an
+already-useless fact, collapsing E1/E2 and E3 into one weaker test. A short
+`Z`-dependent tail fixes this: during the tail, `Z` is both **known** (revealed
+by the first indicator) and **still predictive** (it determines the remaining
+indicators), so the belief legitimately commits. The epoch reset then makes `Z`
+irrelevant, which is where the retention question (E3) lives. So `tail ≥ 2`
+cleanly separates "represents the predictive belief" (E1/E2) from "retains
+predictively-useless identity" (E3).
+
+**As an HMM.** The hidden state is just `(Z, phase-in-epoch)` — the indicator is a
+constant given `Z`, so no bits need to be remembered — giving `2(i + tail)`
+states, built programmatically as a labeled transition tensor `T` and handed to
+`Process`.
 
 **Tunable knobs.**
 - Horizon `i ∈ {1, 2, 5, 10, 20}` (the original project roadmap's set).
-- Reveal function. Default is **copy-`b₁`** (`g_A = b₁`, `g_B = 1 − b₁`). It is
-  used in preference to **parity** (`g = b₁ ⊕ … ⊕ bᵢ`) because parity gets
-  exponentially harder to learn as `i` grows, which would confound "did not
-  learn it" with "chose not to represent it." Copy-`b₁` keeps task difficulty
-  roughly flat across `i`, isolating the horizon. Parity remains a harder variant.
+- `tail` (default 2): the length of the committed window.
+- A harder variant can make the tail a non-trivial function of the prefix (e.g.
+  copy-`b₁` then repeat it, or parity), but the constant indicator keeps task
+  difficulty flat across `i`, isolating the horizon from learnability.
 
-**Two design choices that remove confounds.**
-- **Epoch-aligned sequences + absolute positions.** Seed every sequence at an
-  epoch boundary; within-epoch phase is then `position mod (i + 1)`, which the
-  model reads directly from its positional embedding. This removes the
-  RRXOR-style synchronization problem so it cannot contaminate the measurement.
-- **Deterministic, always-differing reveal.** `g_A` and `g_B` differ on *every*
-  prefix, so the reveal is a clean, sharp disambiguation at exactly `i + 1`.
+**Design choice that removes a confound.** *Epoch-aligned sequences + absolute
+positions.* Seed every sequence at an epoch boundary; within-epoch phase is then
+`position mod (i + tail)`, which the model reads from its positional embedding.
+This removes the RRXOR-style synchronization problem so it cannot contaminate the
+measurement.
 
 ---
 
@@ -89,17 +103,19 @@ Everything inherits from the existing belief machinery (`T` → `stationary`,
 **generator marginal**: group hidden states by their `Z` label and sum belief
 mass to get `P(Z = A | history)`. By construction:
 
-- **Positions `1…i`:** `P(Z = A) = ½` exactly — no evidence. The A-branch and
-  B-branch belief points are **coincident** (collapsed).
-- **Position `i + 1`:** the reveal disambiguates → `P(Z = A)` jumps to `0` or `1`.
-  The branches **bifurcate**.
-- **Next epoch boundary:** `Z` is resampled, so the *previous* epoch's `Z`
-  becomes predictively irrelevant; the optimal belief about the *current* `Z`
-  resets to `½` and **discards** the old one.
+- **Positions `1…i`:** `P(Z = A) = ½` exactly — no evidence. The A- and B-branch
+  belief points are **coincident** (collapsed).
+- **Positions `i+1 … i+tail`:** the first indicator disambiguates → `P(Z = A)`
+  jumps to `0` or `1` and **holds** through the tail. The branches **bifurcate**
+  and stay separated while `Z` remains predictive.
+- **Next epoch boundary:** `Z` is resampled, so the just-revealed `Z` becomes
+  predictively irrelevant; the optimal belief resets to `½` and **discards** it.
 
-This is a precise, tunable geometric prediction: a **collapse-then-bifurcate
-manifold with the bifurcation at exactly `i + 1`**, the dynamic analogue of
-Phase 1's static Mess3 fractal.
+This is verified in `tests/test_mixture.py`: for `i = tail = 2` the generator
+marginal along an epoch is exactly `[½, ½, 1, ½]` (collapse, collapse, commit,
+reset). It is a precise, tunable prediction — a **collapse → bifurcate → reset**
+trajectory with the split at exactly `i + 1` — the dynamic analogue of Phase 1's
+static Mess3 fractal.
 
 ---
 
@@ -160,8 +176,8 @@ the predictive belief" and "represents the generator" diverge.
 ## 6. Controls and confounds
 
 - **Learnability.** Verify the loss reaches the analytic floor for *every* `i`;
-  report the gap. Copy-`b₁` keeps difficulty flat so a missing split means
-  collapse, not incapacity.
+  report the gap. The constant `Z`-indicator keeps task difficulty flat across
+  `i` (no parity to compute), so a missing split means collapse, not incapacity.
 - **Context length.** `n_ctx ≥ i + 1`, ideally `≥ 2(i + 1)` to see the boundary
   in E3 — so `n_ctx` grows with `i` (≈ 42 for `i = 20`). Modest extra compute.
 - **Probe discipline.** Held-out, linear; `Z` is binary, so report both decoding
@@ -176,8 +192,9 @@ the predictive belief" and "represents the generator" diverge.
 
 The Phase 1 abstractions were shaped for exactly this:
 
-- **`src/hmms/mixture.py`** (the stub becomes real): `MixtureProcess(i, reveal="copy")`
-  builds `T`. Inherits `Process` → belief machinery for free.
+- **`src/hmms/mixture.py`** — **implemented (P0):** `MixtureProcess(horizon, tail)`
+  builds `T`; inherits `Process` → belief machinery for free; `generator_marginal`
+  gives the `P(Z=A)` target. Covered by `tests/test_mixture.py`.
 - **Generator target:** add a `state → Z` grouping and a `generator_marginal(belief)`
   helper; `make_eval_set` gains a `Z`-target alongside the hidden-state belief.
 - **`src/probe.py`:** reuse; add a position-resolved variant and a binary `Z`
@@ -209,7 +226,7 @@ the E3 retention metric, MSP size.
 
 ## 9. Milestones
 
-- **P0** — build + unit-test the mixture HMM (no ML).
+- **P0** ✅ *(done)* — build + unit-test the mixture HMM (no ML).
 - **P1** — generator-marginal target + analytic bifurcation prediction + tests.
 - **P2** — train at a single `i`, confirm loss hits the floor.
 - **P3** — position-resolved `Z` probe → E1 + E2 figures.
@@ -220,10 +237,11 @@ the E3 retention metric, MSP size.
 
 ## 10. Smallest first experiment (de-risk before the sweep)
 
-`i = 2`, copy-`b₁` reveal, `n_ctx = 8`, one model. Success criteria:
+`i = 2`, `tail = 2` (epoch length 4), `n_ctx = 8` (two epochs), one model.
+Success criteria:
 
-- training loss reaches the analytic floor;
-- `Z` undecodable at `t ≤ 2`, decodable at `t = 3`;
-- the analytic bifurcation matches the recovered one.
+- training loss reaches the analytic floor (`0.75` bits `= (i+1)/(i+tail)`);
+- `Z` undecodable for `t ≤ 2`, decodable from `t = 3` (the first indicator);
+- the recovered generator marginal tracks the analytic `[½, ½, 1, ½]` per epoch.
 
 If that holds, the `i`-sweep (P4) and the retention test (P5) are mechanical.
