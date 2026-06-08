@@ -367,6 +367,33 @@ def plot_direction_transfer(positions, perpos_acc, transfer_acc, horizon, epoch_
     return fig
 
 
+def plot_ablation_loss(pred_positions, clean, ablate_used, ablate_retained,
+                       use_pos, epoch_len, save_path=None, title=None):
+    """Per-position next-token loss under three conditions: clean, ablate the coin
+    where it is *used* (positive control — should spike), and ablate the *retained*
+    coin in epoch >= 2 (should match clean if the retained copy is causally inert)."""
+    x = np.asarray(pred_positions)
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    n_ep = (epoch_len + len(x)) // epoch_len
+    ax.axvspan(epoch_len - 0.5, x.max() + 0.5, color="C0", alpha=0.06,
+               label="retention region (epoch ≥ 2)")
+    ax.plot(x, clean, marker="o", color="0.3", lw=2, label="clean")
+    ax.plot(x, ablate_retained, marker="s", color="C0", lw=1.6, ls="--",
+            label="ablate retained coin (epoch ≥ 2)")
+    ax.plot(x, ablate_used, marker="^", color="C3", lw=1.6, ls=":",
+            label=f"ablate coin @ pos {use_pos} (used — control)")
+    ax.set_xlabel("prediction position (predict token p+1)")
+    ax.set_ylabel("cross-entropy (nats)")
+    ax.set_xticks(list(x))
+    ax.set_title(title or "Causal ablation: is the retained coin actually used?")
+    ax.legend(fontsize=8.5)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
 def plot_transfer_cosine_matrices(transfer, cosine, epoch_len, save_path=None, title=None):
     """Heatmaps of position->position probe-transfer accuracy and coin-direction cosine.
     A bright off-diagonal block among epoch>=2 positions = one shared retained
