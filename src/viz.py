@@ -287,6 +287,140 @@ def plot_generator_decodability(
     return fig
 
 
+def plot_retention_vs_horizon(by_i, save_path=None, title=None):
+    """Mean retention accuracy (decode spent coin in epoch >= 2) vs divergence horizon,
+    with seed error bars; reference curves for the post-reveal and prefix regimes."""
+    iv = sorted(by_i)
+    means = [by_i[i]["mean"] for i in iv]
+    stds = [by_i[i]["std"] for i in iv]
+    rev = [by_i[i]["revealed"] for i in iv]
+    pre = [by_i[i]["prefix"] for i in iv]
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax.plot(iv, rev, marker="s", color="0.45", ls="--", lw=1.2, label="epoch 1, after reveal")
+    ax.errorbar(iv, means, yerr=stds, marker="o", color="C3", capsize=3, lw=2,
+                label="retention (epoch ≥ 2)")
+    ax.plot(iv, pre, marker="^", color="0.7", ls=":", lw=1, label="prefix (control)")
+    ax.set_xscale("log")
+    ax.set_xticks(iv)
+    ax.set_xticklabels([str(i) for i in iv])
+    ax.set_xlabel("divergence horizon  i")
+    ax.set_ylabel("decode first-epoch coin (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_title(title or "Retention of the spent coin vs. horizon (± seeds)")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_retention_decay(decay_by_i, save_path=None, title=None):
+    """Decode accuracy vs. tokens-since-reveal, one curve per horizon (seed-averaged).
+    Flat near the upper bound = no decay (persistent memory); a downward slope = decay."""
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    for i in sorted(decay_by_i):
+        x, acc = decay_by_i[i]
+        ax.plot(x, acc, marker=".", lw=1.5, label=f"i={i}")
+    ax.axvline(0, color="C2", ls="-.", lw=1, alpha=0.6)
+    ax.set_xlabel("tokens since the first-epoch coin was revealed")
+    ax.set_ylabel("decode coin (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_title(title or "Does the retained coin decay with distance?")
+    ax.legend(fontsize=8, ncol=3)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_direction_transfer(positions, perpos_acc, transfer_acc, horizon, epoch_len,
+                            save_path=None, title=None):
+    """Per-position probe vs. the reveal-position probe transferred to other positions.
+    If the transferred probe keeps working in epoch >= 2, the coin is carried in the
+    *same* direction (one persistent representation), not re-encoded position by position."""
+    positions = np.asarray(positions)
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    n_ep = (len(positions) + epoch_len - 1) // epoch_len
+    if n_ep > 1:
+        ax.axvspan(epoch_len - 0.5, len(positions) - 0.5, color="C0", alpha=0.07,
+                   label="retention region (epoch ≥ 2)")
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax.plot(positions, perpos_acc, marker="o", color="C3", lw=2,
+            label="probe trained per position")
+    ax.plot(positions, transfer_acc, marker="s", color="C0", lw=1.6, ls="--",
+            label="reveal-position probe, transferred")
+    ax.axvline(horizon, color="C2", ls="-.", lw=1, alpha=0.7, label=f"reveal (pos {horizon})")
+    ax.set_xlabel("token position")
+    ax.set_ylabel("decode first-epoch coin (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_xticks(list(positions))
+    ax.set_title(title or "Is the coin carried in the same direction?")
+    ax.legend(fontsize=8.5, loc="lower left", ncol=2)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_transfer_cosine_matrices(transfer, cosine, epoch_len, save_path=None, title=None):
+    """Heatmaps of position->position probe-transfer accuracy and coin-direction cosine.
+    A bright off-diagonal block among epoch>=2 positions = one shared retained
+    direction; a dark off-diagonal = the coin is re-encoded per position."""
+    transfer, cosine = np.asarray(transfer), np.asarray(cosine)
+    L = transfer.shape[0]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+    for ax, M, name, vmin in ((axes[0], transfer, "transfer accuracy", 0.5),
+                              (axes[1], cosine, "direction cosine", -1.0)):
+        im = ax.imshow(M, origin="lower", cmap="viridis", vmin=vmin, vmax=1.0)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+        ax.set_xlabel("evaluated at position")
+        ax.set_ylabel("probe trained at position")
+        ax.set_title(name, fontsize=10)
+        ax.set_xticks(range(L)); ax.set_yticks(range(L))
+        ax.axvline(epoch_len - 0.5, color="w", lw=1)
+        ax.axhline(epoch_len - 0.5, color="w", lw=1)
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_depth_consistency(layers, layer_acc, layer_cos, position, save_path=None, title=None):
+    """Left: per-layer decode accuracy of the coin at a fixed (retention) position.
+    Right: cross-layer cosine of the coin direction. High off-diagonal cosine = a
+    consistent direction across depth (refusal-like); low = depth-specific encoding."""
+    layers = list(layers)
+    layer_cos = np.asarray(layer_cos)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+    axes[0].plot(layers, layer_acc, marker="o", color="C3", lw=2)
+    axes[0].axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    axes[0].set_xlabel("layer (resid_post)")
+    axes[0].set_ylabel("decode coin (accuracy)")
+    axes[0].set_ylim(0.4, 1.03)
+    axes[0].set_xticks(layers)
+    axes[0].grid(alpha=0.2)
+    axes[0].set_title(f"per-layer, position {position}", fontsize=10)
+    axes[0].legend(fontsize=8)
+    im = axes[1].imshow(layer_cos, origin="lower", cmap="viridis", vmin=-1, vmax=1)
+    fig.colorbar(im, ax=axes[1], fraction=0.046)
+    axes[1].set_xlabel("layer"); axes[1].set_ylabel("layer")
+    axes[1].set_title("direction cosine across depth", fontsize=10)
+    axes[1].set_xticks(layers); axes[1].set_yticks(layers)
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
 def _save(fig, save_path, dark=False):
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
