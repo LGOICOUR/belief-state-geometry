@@ -142,7 +142,7 @@ embedding.
 ```
 belief-state-geometry/
   src/
-    hmms/            # data-generating processes (Process ABC + Mess3, RRXOR, Phase-2 stub)
+    hmms/            # data-generating processes (Process ABC + Mess3, RRXOR, Mixture)
     beliefs.py       # analytic belief states, MSP enumeration/sampling, entropy rate, simplex projection
     data.py          # sequence sampling, batching, held-out eval sets, seeding/device
     model.py         # HookedTransformer config matching the paper
@@ -165,13 +165,37 @@ belief-state-geometry/
   the next-token distribution the model was trained on (which is a lossy function of
   the belief). Quantified in `results/metrics_rrxor.json`.
 
-## Phase 2 (designed for, not built here)
+## Phase 2 — mixture processes: does the residual hold *only* what it needs?
 
-`src/hmms/mixture.py` is a documented stub. The abstractions (`Process`, the data
-pipeline, the probe) are deliberately generic so a *mixture* meta-process and a
-"which-generator" probe target slot in without refactoring — to test whether the
-residual stream collapses mechanistically-distinct generators onto the same
-belief-space point until predictive equivalence breaks at a tunable horizon.
+Phase 1 shows the residual stream *contains* the belief state. Phase 2 asks whether it
+contains **only** the minimal sufficient statistic, or more. A **mixture process**
+(`src/hmms/mixture.py`) flips a hidden fair coin `Z` each epoch, choosing one of two
+sub-generators that are statistically identical for `i` steps and then diverge; `Z` is
+resampled every epoch. Once an epoch ends, `Z` is **predictively defunct** — a minimal
+predictor would discard it.
+
+**Result: the model is "super-sufficient."** It keeps the defunct coin linearly
+decodable at ~100% well into the next epoch, where the optimal belief has provably
+dropped it — the residual carries the belief state **plus** predictively-irrelevant
+memory (it is *finer-grained than the causal state*), while still predicting optimally
+(loss at the in-context floor). Established with controls:
+
+- **Robust** — retention ≈ 1.0 across horizons `i ∈ {1,2,5,10,20}` × 3 seeds, all at the
+  loss floor, with decodability onset tracking the horizon exactly
+  ([`results/mixture_retention_vs_horizon.png`](results/mixture_retention_vs_horizon.png)).
+- **Causally inert, not silently used** — ablating the coin's direction in epoch 2 drives
+  its decodability 1.0 → 0.50 yet leaves next-token loss unchanged, while the *same*
+  ablation where the coin **is** used spikes the loss
+  ([`results/mixture_ablation.png`](results/mixture_ablation.png)).
+- **Not merely spare capacity** — shrinking the residual width to the edge of learnability
+  does not induce forgetting (the latent stays re-readable in-context), so minimality does
+  not emerge from bandwidth pressure
+  ([`results/mixture_capacity_pressure.png`](results/mixture_capacity_pressure.png)).
+
+The mixture is just another `Process` and "which generator" is just another probe
+target, so this reuses the Phase-1 abstractions unchanged. Full method, geometry, and
+caveats: [`docs/phase2.md`](docs/phase2.md). Reproduce via the
+`experiments.run_mixture_*` / `causal_ablation` / `capacity_pressure_sweep` functions.
 
 ## References
 

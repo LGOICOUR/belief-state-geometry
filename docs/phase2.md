@@ -1,10 +1,12 @@
 # Phase 2 — Belief-State Collapse in Mixture Processes
 
-> **Status: design + P0 implemented.** This document specifies the Phase 2
-> experiment; the process construction (P0) is built and tested in
-> `src/hmms/mixture.py` / `tests/test_mixture.py`. The remaining milestones (P1–P5)
-> are not built yet. Phase 1 (Mess3 / RRXOR) is complete on `main`; Phase 2 lives
-> on branch `phase2/mixture-collapse`.
+> **Status: built (P0–P5) and validated.** This document is the design/method spec;
+> the construction, retention probe, horizon×seed sweep, direction/depth geometry,
+> causal ablation, and capacity-pressure sweep are all implemented in `src/` and
+> reproduced in `results/` (figures linked from the README). Headline: the residual is
+> **super-sufficient** — it retains a predictively-defunct latent that the minimal
+> belief discards, robustly (5 horizons × 3 seeds) and causally-inertly (ablation),
+> and not removed by capacity pressure. Honest caveats are kept in §4 and §7.
 
 ## Abstract
 
@@ -227,11 +229,11 @@ the E3 retention metric, MSP size.
 ## 9. Milestones
 
 - **P0** ✅ *(done)* — build + unit-test the mixture HMM (no ML).
-- **P1** — generator-marginal target + analytic bifurcation prediction + tests.
-- **P2** — train at a single `i`, confirm loss hits the floor.
-- **P3** — position-resolved `Z` probe → E1 + E2 figures.
-- **P4** — sweep `i`; the onset-tracks-horizon result.
-- **P5** — retention experiment (E3) + write-up.
+- **P1** ✅ — generator-marginal target + analytic bifurcation prediction + tests.
+- **P2** ✅ — train at a single `i`; loss reaches the floor.
+- **P3** ✅ — position-resolved `Z` probe + direction/depth geometry.
+- **P4** ✅ — horizon×seed sweep; onset tracks horizon; retention robust.
+- **P5** ✅ — retention + causal ablation (inert) + capacity sweep (no emergent minimality).
 
 ---
 
