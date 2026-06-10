@@ -1018,6 +1018,120 @@ def capacity_pressure_sweep(
 
 
 # ====================================================================== #
+# Retention ledger: does the model hold ALL the spent coins at once?
+# ====================================================================== #
+def retention_ledger(
+    horizon: int = 2,
+    tail: int = 2,
+    n_epochs: int = 6,
+    d_model: int = 64,
+    n_steps: int = 10_000,
+    n_fit: int = 4000,
+    n_test: int = 4000,
+    seed: int = 0,
+    converged_tol: float = 0.02,
+    device=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Many-epoch retention: decode EVERY epoch's coin at EVERY position.
+
+    Phase 2 established that one spent coin is retained across one epoch boundary.
+    This extends the context to ``n_epochs`` epochs (``n_ctx = n_epochs *
+    (horizon + tail)``), so by the end the stream holds several coins of different
+    ages — and asks whether the model keeps a *ledger* of all of them.
+
+    The accuracy matrix ``acc[e, p]`` (epoch-e's coin decoded at position p) has
+    built-in sanity structure: ~0.5 before epoch e begins (that coin hasn't been
+    flipped yet — decoding it would mean predicting a future fair coin) and ~0.5
+    through epoch e's prefix (information-theoretically absent, the E4 control).
+    The science is the region after each reveal: a full bright band to the right
+    edge means every dead coin is retained simultaneously; sagging bands for old
+    coins mean graceful forgetting with age. Run at small ``d_model`` to ask
+    whether *load* (several dead coins + the live task) forces the oldest out.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = process.epoch_len
+    n_ctx = n_epochs * epoch_len
+
+    arch = ArchConfig.paper(process, n_ctx=n_ctx, seed=seed,
+                            d_model=d_model, d_head=min(8, d_model))
+    cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=n_steps, seed=seed)
+    result = train(process, arch, cfg, verbose=False,
+                   init_states_fn=process.aligned_init_states,
+                   process_name=f"mix-ledger(w={d_model})")
+    model = result.model
+    floor = _mixture_floor_nats(process, n_ctx, seed=seed + 999)
+    loss = _eval_aligned_loss(model, process, n_ctx, device)
+    print(f"[ledger w={d_model}] trained: loss={loss:.4f} floor={floor:.4f} "
+          f"gap={loss - floor:+.4f}", flush=True)
+    if save:
+        save_checkpoint(result, REPO_ROOT / "checkpoints" /
+                        f"mixture_ledger_w{d_model}.pt")
+
+    fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+    test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+    Xf, Xt = _residuals_3d(model, fit.tokens), _residuals_3d(model, test.tokens)
+
+    acc = np.zeros((n_epochs, n_ctx))
+    for e in range(n_epochs):
+        yf = fit.z_labels[:, e * epoch_len]
+        yt = test.z_labels[:, e * epoch_len]
+        for p in range(n_ctx):
+            clf = LogisticRegression(max_iter=2000).fit(Xf[:, p, :], yf)
+            acc[e, p] = accuracy_score(yt, clf.predict(Xt[:, p, :]))
+        print(f"[ledger w={d_model}] coin {e + 1}/{n_epochs} probed "
+              f"(final-pos acc {acc[e, -1]:.3f})", flush=True)
+
+    reveals = [e * epoch_len + horizon for e in range(n_epochs)]
+    # retention-by-age: mean accuracy at a given offset since reveal, over coins
+    by_age = {}
+    for off in range(n_ctx - horizon):
+        vals = [acc[e, reveals[e] + off] for e in range(n_epochs)
+                if reveals[e] + off < n_ctx]
+        if vals:
+            by_age[off] = round(float(np.mean(vals)), 4)
+    future_coin = float(np.mean([acc[e, :e * epoch_len].mean()
+                                 for e in range(1, n_epochs)]))
+    prefix_ctrl = float(np.mean([acc[e, e * epoch_len:reveals[e]].mean()
+                                 for e in range(n_epochs)]))
+
+    metrics = {
+        "process": f"mixture(h={horizon},tail={tail})",
+        "d_model": d_model, "n_epochs": n_epochs, "n_ctx": n_ctx, "seed": seed,
+        "training": {"final_loss_nats": round(loss, 4),
+                     "floor_nats": round(floor, 4),
+                     "gap_nats": round(loss - floor, 4),
+                     "converged": bool(loss - floor < converged_tol)},
+        "accuracy_matrix": acc.round(4).tolist(),
+        "ledger_at_final_position": [round(float(acc[e, -1]), 4)
+                                     for e in range(n_epochs)],
+        "retention_by_age": by_age,
+        "future_coin_mean_acc": round(future_coin, 4),
+        "prefix_control_mean_acc": round(prefix_ctrl, 4),
+        "interpretation": (
+            "acc[e, p] = decoding epoch-e's coin at position p from the all-layer "
+            "residual. ~0.5 before epoch e (future coin) and through its prefix "
+            "(E4 control) validate the probe; the post-reveal band is the ledger: "
+            "flat ~1.0 to the right edge = all dead coins retained simultaneously; "
+            "sagging old-coin bands = forgetting with age."),
+    }
+    fig = viz.plot_retention_ledger(
+        acc, horizon, epoch_len,
+        save_path=(results_dir / f"retention_ledger_w{d_model}.png") if save else None,
+        title=f"Retention ledger — {n_epochs} epochs, d_model={d_model} "
+              f"(gap {loss - floor:+.3f} nats)")
+    if save:
+        metrics["figure"] = _rel(results_dir / f"retention_ledger_w{d_model}.png")
+        _write_metrics(metrics, results_dir / f"metrics_retention_ledger_w{d_model}.json")
+    return {"metrics": metrics, "acc": acc, "figure": fig, "model": model}
+
+
+# ====================================================================== #
 # Norm vs uncertainty: does the residual's LENGTH carry belief confidence?
 # ====================================================================== #
 def norm_confidence_analysis(

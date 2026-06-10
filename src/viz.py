@@ -367,6 +367,48 @@ def plot_direction_transfer(positions, perpos_acc, transfer_acc, horizon, epoch_
     return fig
 
 
+def plot_retention_ledger(acc, horizon, epoch_len, save_path=None, title=None):
+    """Left: decode accuracy for each epoch's coin (rows) at every position (cols).
+    Expected structure: ~0.5 before a coin's epoch begins (the coin doesn't exist
+    yet) and through its prefix (information-theoretically absent); the question is
+    the region after each reveal — a full bright band to the right edge = the model
+    holds a LEDGER of dead coins. Right: the same data aligned at each coin's
+    reveal; flat curves at ~1.0 = no decay with age."""
+    acc = np.asarray(acc)
+    n_epochs, L = acc.shape
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.4),
+                                   gridspec_kw={"width_ratios": [1.6, 1]})
+    im = ax1.imshow(acc, aspect="auto", cmap="viridis", vmin=0.45, vmax=1.0)
+    fig.colorbar(im, ax=ax1, fraction=0.03, label="decode accuracy")
+    for e in range(n_epochs):
+        ax1.plot([e * epoch_len + horizon - 0.5] * 2, [e - 0.5, e + 0.5],
+                 color="w", lw=2.5)
+    for e in range(1, n_epochs):
+        ax1.axvline(e * epoch_len - 0.5, color="w", lw=0.6, alpha=0.5)
+    ax1.set_yticks(range(n_epochs))
+    ax1.set_yticklabels([f"coin {e + 1}" for e in range(n_epochs)])
+    ax1.set_xlabel("token position")
+    ax1.set_title("every coin × every position (white tick = its reveal)", fontsize=10)
+
+    for e in range(n_epochs):
+        reveal = e * epoch_len + horizon
+        xs = np.arange(reveal, L) - reveal
+        ax2.plot(xs, acc[e, reveal:], marker=".", lw=1.4, ms=4, label=f"coin {e + 1}")
+    ax2.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax2.set_xlabel("tokens since this coin's reveal")
+    ax2.set_ylabel("decode accuracy")
+    ax2.set_ylim(0.45, 1.03)
+    ax2.legend(fontsize=7.5, ncol=2, loc="lower left")
+    ax2.grid(alpha=0.2)
+    ax2.set_title("aligned at reveal — decay with age?", fontsize=10)
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
 def plot_norm_confidence(scatter, per_layer, save_path=None, title=None):
     """Does the residual NORM track belief uncertainty?
 
