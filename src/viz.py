@@ -367,6 +367,47 @@ def plot_direction_transfer(positions, perpos_acc, transfer_acc, horizon, epoch_
     return fig
 
 
+def plot_norm_confidence(scatter, per_layer, save_path=None, title=None):
+    """Does the residual NORM track belief uncertainty?
+
+    Left: ‖resid‖ vs analytic belief entropy at the single (layer, position) cell
+    with the strongest correlation — computed *within* a position, so the systematic
+    norm-vs-position and entropy-vs-position trends cannot fake a correlation.
+    Right: per-layer mean within-position Spearman ρ (± std across positions) for
+    belief entropy and next-token entropy.
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.4))
+    ax1.scatter(scatter["H"], scatter["norm"], s=6, alpha=0.25, color="C0",
+                rasterized=True)
+    ax1.set_xlabel("belief entropy H(b) (bits)")
+    ax1.set_ylabel("‖residual‖ (L2)")
+    ax1.set_title(f"layer {scatter['layer']}, position {scatter['position']}: "
+                  f"Spearman ρ = {scatter['rho']:+.3f}", fontsize=10)
+    ax1.grid(alpha=0.2)
+
+    layers = sorted(per_layer)
+    for key, color, lab, dx in (("rho_belief", "C3", "H(belief)", -0.06),
+                                ("rho_nexttok", "0.5", "H(next token)", +0.06)):
+        m = [per_layer[l][f"{key}_mean"] for l in layers]
+        s = [per_layer[l][f"{key}_std"] for l in layers]
+        ax2.errorbar([l + dx for l in layers], m, yerr=s, marker="o", color=color,
+                     lw=1.8, capsize=3, label=lab)
+    ax2.axhline(0, color="0.6", ls=":", lw=1)
+    ax2.set_xticks(layers)
+    ax2.set_xlabel("layer (resid_post)")
+    ax2.set_ylabel("within-position Spearman ρ")
+    ax2.set_ylim(-1, 1)
+    ax2.legend(fontsize=9)
+    ax2.grid(alpha=0.2)
+    ax2.set_title("norm–uncertainty correlation by layer", fontsize=10)
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
 def plot_capacity_pressure(by_w, tol, n_seeds, save_path=None, title=None):
     """Two stacked panels vs residual width d_model (log x):
     top — retention of the spent coin (mean ± seeds), with the revealed-region and
