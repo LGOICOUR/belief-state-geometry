@@ -1015,3 +1015,134 @@ def capacity_pressure_sweep(
         summary["figure"] = _rel(results_dir / "mixture_capacity_pressure.png")
         _write_metrics(summary, results_dir / "mixture_capacity_summary.json")
     return summary
+
+
+# ====================================================================== #
+# Norm vs uncertainty: does the residual's LENGTH carry belief confidence?
+# ====================================================================== #
+def norm_confidence_analysis(
+    checkpoint_path,
+    process,
+    n_seqs: int = 4000,
+    seed: int = 0,
+    hook: str = "resid_post",
+    min_cell: int = 50,
+    device=None,
+):
+    """Within-position correlation between residual L2 norm and belief uncertainty.
+
+    Phase 1/2 study the residual's *direction* (the belief geometry). This asks an
+    orthogonal question: does its *norm* track the optimal observer's uncertainty —
+    the Shannon entropy of the analytic belief (and, separately, of the optimal
+    next-token distribution)?
+
+    Methodological notes (the design IS the result here):
+
+    * **Position is a confound.** Norms grow systematically with position (learned
+      positional embeddings, accumulated writes) and belief entropy falls with
+      position (synchronization). A pooled correlation would mostly measure
+      position. All correlations are therefore computed *within* a (layer,
+      position) cell, across sequences, then aggregated.
+    * **Token identity is a sub-confound.** Within a position, the current token's
+      embedding contributes to the norm and also moves the belief. A stricter
+      within-(position, current-token) Spearman is reported alongside.
+    * **Degenerate cells are skipped.** At position 0 (and any symmetric cell) all
+      histories give equal-entropy beliefs (process symmetry), so the correlation
+      is undefined there; cells with ~zero entropy variance are excluded and
+      counted.
+    * **The mixture process is excluded by design**: epoch-aligned phase determines
+      its belief entropy exactly, so within-position entropy variance is ~0 at
+      every position — there is nothing to correlate. Mess3 (continuous entropy on
+      the fractal) and RRXOR (discrete entropy levels across histories) are the
+      right testbeds.
+    * **LayerNorm null.** Each block reads the stream through LayerNorm, which
+      discards scale; the network has no first-order reason to *use* the norm. A
+      near-zero correlation is therefore a meaningful null ("confidence is purely
+      directional"), not a failed experiment.
+    """
+    from scipy.stats import spearmanr
+
+    device = get_device(device)
+    model, ckpt = load_checkpoint(checkpoint_path, device)
+    seq_len = ckpt["arch"]["n_ctx"]
+    data = make_eval_set(process, n_seqs, seq_len, seed + 11, device)
+
+    Hb = B.entropy(data.beliefs, axis=-1, units="bits")            # [N, L] belief entropy
+    nd = np.einsum("nli,xij->nlx", data.beliefs, process.T)        # P(next | belief)
+    Hx = B.entropy(nd, axis=-1, units="bits")                      # [N, L] next-token entropy
+
+    N, L = data.tokens.shape
+    usable = [t for t in range(L) if Hb[:, t].std() > 1e-9]
+    skipped = [t for t in range(L) if t not in usable]
+
+    cached = cache_residuals(model, data.tokens, hook)
+    per_layer = {}
+    best = None
+    for l in sorted(cached):
+        R = cached[l].reshape(N, L, -1)
+        norms = np.linalg.norm(R, axis=-1)                         # [N, L]
+        rb, rx, rbt = [], [], []
+        for t in usable:
+            rho_b = float(spearmanr(norms[:, t], Hb[:, t]).statistic)
+            rho_x = float(spearmanr(norms[:, t], Hx[:, t]).statistic)
+            rb.append(rho_b)
+            rx.append(rho_x)
+            # stricter control: within (position, current token)
+            cell = []
+            for tok in range(process.n_symbols):
+                m = data.emissions[:, t] == tok
+                if m.sum() >= min_cell and Hb[m, t].std() > 1e-9:
+                    cell.append(float(spearmanr(norms[m, t], Hb[m, t]).statistic))
+            if cell:
+                rbt.append(float(np.mean(cell)))
+            if best is None or abs(rho_b) > abs(best["rho"]):
+                best = {"layer": int(l), "position": int(t), "rho": rho_b,
+                        "norm": norms[:, t].copy(), "H": Hb[:, t].copy()}
+        per_layer[l] = {
+            "rho_belief_mean": float(np.mean(rb)), "rho_belief_std": float(np.std(rb)),
+            "rho_nexttok_mean": float(np.mean(rx)), "rho_nexttok_std": float(np.std(rx)),
+            "rho_belief_per_position": [round(v, 4) for v in rb],
+            "rho_nexttok_per_position": [round(v, 4) for v in rx],
+            "rho_belief_within_pos_and_token_mean":
+                float(np.mean(rbt)) if rbt else None,
+        }
+
+    # how entangled the two uncertainty measures are (context for reading the bars)
+    corr_HbHx = float(spearmanr(Hb[:, usable].ravel(), Hx[:, usable].ravel()).statistic)
+
+    metrics = {
+        "checkpoint": str(checkpoint_path),
+        "n_seqs": n_seqs, "seq_len": seq_len, "hook": hook,
+        "usable_positions": usable, "skipped_positions_degenerate_entropy": skipped,
+        "per_layer": {str(l): per_layer[l] for l in per_layer},
+        "strongest_cell": {"layer": best["layer"], "position": best["position"],
+                           "rho": round(best["rho"], 4)},
+        "spearman_Hbelief_vs_Hnexttok": round(corr_HbHx, 4),
+    }
+    return metrics, best, per_layer
+
+
+def run_norm_confidence(
+    n_seqs: int = 4000,
+    seed: int = 0,
+    device=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Run the norm-vs-uncertainty analysis on the Mess3 and RRXOR checkpoints."""
+    out = {}
+    ckpt_dir = REPO_ROOT / "checkpoints"
+    for name, proc, ckpt in (("mess3", Mess3(), ckpt_dir / "mess3_fast.pt"),
+                             ("rrxor", RRXOR(), ckpt_dir / "rrxor_fast.pt")):
+        metrics, best, per_layer = norm_confidence_analysis(
+            ckpt, proc, n_seqs=n_seqs, seed=seed, device=device)
+        fig = viz.plot_norm_confidence(
+            best, per_layer,
+            save_path=(results_dir / f"norm_confidence_{name}.png") if save else None,
+            title=f"{name}: residual norm vs belief uncertainty (within-position)")
+        metrics["figure"] = _rel(results_dir / f"norm_confidence_{name}.png")
+        out[name] = {"metrics": metrics, "figure": fig}
+    if save:
+        _write_metrics({k: v["metrics"] for k, v in out.items()},
+                       results_dir / "metrics_norm_confidence.json")
+    return out

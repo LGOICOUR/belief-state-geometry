@@ -1,0 +1,284 @@
+{
+  "mess3": {
+    "checkpoint": "/Users/luisgoicouria/Desktop/ML Projects/belief-state-geometry/checkpoints/mess3_fast.pt",
+    "n_seqs": 4000,
+    "seq_len": 10,
+    "hook": "resid_post",
+    "usable_positions": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "skipped_positions_degenerate_entropy": [
+      0
+    ],
+    "per_layer": {
+      "0": {
+        "rho_belief_mean": -0.43780150813802476,
+        "rho_belief_std": 0.10892815593500502,
+        "rho_nexttok_mean": -0.40622529893406084,
+        "rho_nexttok_std": 0.19999709839047677,
+        "rho_belief_per_position": [
+          -0.271,
+          -0.5659,
+          -0.5354,
+          -0.4041,
+          -0.3907,
+          -0.5225,
+          -0.5263,
+          -0.4699,
+          -0.2544
+        ],
+        "rho_nexttok_per_position": [
+          0.1055,
+          -0.571,
+          -0.5289,
+          -0.4824,
+          -0.4287,
+          -0.5226,
+          -0.4977,
+          -0.4755,
+          -0.2549
+        ],
+        "rho_belief_within_pos_and_token_mean": -0.563288325433239
+      },
+      "1": {
+        "rho_belief_mean": -0.38924971522412366,
+        "rho_belief_std": 0.17185101401250805,
+        "rho_nexttok_mean": -0.4456491472911245,
+        "rho_nexttok_std": 0.05353265331140825,
+        "rho_belief_per_position": [
+          0.0738,
+          -0.4629,
+          -0.4263,
+          -0.3368,
+          -0.446,
+          -0.5383,
+          -0.4791,
+          -0.4784,
+          -0.4092
+        ],
+        "rho_nexttok_per_position": [
+          -0.4538,
+          -0.3888,
+          -0.4268,
+          -0.3596,
+          -0.4742,
+          -0.5506,
+          -0.4709,
+          -0.4768,
+          -0.4095
+        ],
+        "rho_belief_within_pos_and_token_mean": -0.42994861913324267
+      },
+      "2": {
+        "rho_belief_mean": -0.08072607393761728,
+        "rho_belief_std": 0.23749865969722514,
+        "rho_nexttok_mean": -0.1603972014280984,
+        "rho_nexttok_std": 0.2168765598876754,
+        "rho_belief_per_position": [
+          0.3633,
+          0.1984,
+          0.1588,
+          -0.1557,
+          -0.3046,
+          -0.2739,
+          -0.1876,
+          -0.3102,
+          -0.215
+        ],
+        "rho_nexttok_per_position": [
+          -0.472,
+          0.259,
+          0.1434,
+          -0.0892,
+          -0.2719,
+          -0.2802,
+          -0.2152,
+          -0.3025,
+          -0.215
+        ],
+        "rho_belief_within_pos_and_token_mean": -0.20905801975265434
+      },
+      "3": {
+        "rho_belief_mean": -0.32188672287074455,
+        "rho_belief_std": 0.09545065781530349,
+        "rho_nexttok_mean": -0.30459094559658967,
+        "rho_nexttok_std": 0.12768703591053301,
+        "rho_belief_per_position": [
+          -0.2301,
+          -0.3377,
+          -0.1982,
+          -0.193,
+          -0.3718,
+          -0.4741,
+          -0.382,
+          -0.4255,
+          -0.2846
+        ],
+        "rho_nexttok_per_position": [
+          -0.0353,
+          -0.3204,
+          -0.1987,
+          -0.2302,
+          -0.399,
+          -0.4724,
+          -0.3724,
+          -0.4277,
+          -0.2852
+        ],
+        "rho_belief_within_pos_and_token_mean": -0.2893267226992544
+      }
+    },
+    "strongest_cell": {
+      "layer": 0,
+      "position": 2,
+      "rho": -0.5659
+    },
+    "spearman_Hbelief_vs_Hnexttok": 0.9989,
+    "figure": "results/norm_confidence_mess3.png"
+  },
+  "rrxor": {
+    "checkpoint": "/Users/luisgoicouria/Desktop/ML Projects/belief-state-geometry/checkpoints/rrxor_fast.pt",
+    "n_seqs": 4000,
+    "seq_len": 10,
+    "hook": "resid_post",
+    "usable_positions": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "skipped_positions_degenerate_entropy": [
+      0,
+      1
+    ],
+    "per_layer": {
+      "0": {
+        "rho_belief_mean": 0.15949730940498147,
+        "rho_belief_std": 0.08379483150865571,
+        "rho_nexttok_mean": 0.014728507389578881,
+        "rho_nexttok_std": 0.09461844089889775,
+        "rho_belief_per_position": [
+          0.2369,
+          0.1353,
+          0.0864,
+          0.2587,
+          0.1383,
+          0.0035,
+          0.2576,
+          0.1593
+        ],
+        "rho_nexttok_per_position": [
+          0.09,
+          0.2295,
+          -0.0348,
+          -0.0594,
+          0.0325,
+          -0.0494,
+          -0.0346,
+          -0.056
+        ],
+        "rho_belief_within_pos_and_token_mean": 0.15878627857584263
+      },
+      "1": {
+        "rho_belief_mean": 0.02490954155883513,
+        "rho_belief_std": 0.15763416873546288,
+        "rho_nexttok_mean": 0.03899232764466745,
+        "rho_nexttok_std": 0.07361245333765809,
+        "rho_belief_per_position": [
+          0.3788,
+          0.106,
+          -0.1597,
+          0.0546,
+          -0.0916,
+          -0.1093,
+          0.0099,
+          0.0106
+        ],
+        "rho_nexttok_per_position": [
+          0.0889,
+          0.1143,
+          0.087,
+          0.0392,
+          0.0766,
+          -0.066,
+          -0.1001,
+          0.072
+        ],
+        "rho_belief_within_pos_and_token_mean": -0.02854370220830993
+      },
+      "2": {
+        "rho_belief_mean": 0.05317322244307395,
+        "rho_belief_std": 0.180354846087607,
+        "rho_nexttok_mean": 0.27708580444807795,
+        "rho_nexttok_std": 0.2520464251850926,
+        "rho_belief_per_position": [
+          -0.0323,
+          0.4772,
+          -0.0041,
+          0.093,
+          -0.2006,
+          0.0573,
+          0.0429,
+          -0.008
+        ],
+        "rho_nexttok_per_position": [
+          -0.2282,
+          0.6714,
+          0.2199,
+          0.3696,
+          0.3723,
+          0.2223,
+          0.4856,
+          0.1039
+        ],
+        "rho_belief_within_pos_and_token_mean": 0.025235192597364488
+      },
+      "3": {
+        "rho_belief_mean": -0.03364388308446708,
+        "rho_belief_std": 0.28113604200339726,
+        "rho_nexttok_mean": 0.6806306996554403,
+        "rho_nexttok_std": 0.29235784247628843,
+        "rho_belief_per_position": [
+          0.6289,
+          0.1654,
+          -0.1848,
+          -0.2515,
+          -0.0384,
+          -0.1747,
+          -0.2486,
+          -0.1654
+        ],
+        "rho_nexttok_per_position": [
+          0.5602,
+          0.2734,
+          0.8992,
+          0.8645,
+          0.8697,
+          0.9179,
+          0.9072,
+          0.1529
+        ],
+        "rho_belief_within_pos_and_token_mean": -0.06092424599216851
+      }
+    },
+    "strongest_cell": {
+      "layer": 3,
+      "position": 2,
+      "rho": 0.6289
+    },
+    "spearman_Hbelief_vs_Hnexttok": -0.0713,
+    "figure": "results/norm_confidence_rrxor.png"
+  }
+}
