@@ -895,3 +895,123 @@ def causal_ablation(horizon=2, tail=2, n_ctx=8, seed=0, n_fit=6000, n_test=6000,
         metrics["figure"] = _rel(results_dir / "mixture_ablation.png")
         _write_metrics(metrics, results_dir / "metrics_mixture_ablation.json")
     return {"metrics": metrics, "figure": fig}
+
+
+def capacity_pressure_sweep(
+    widths=(2, 3, 4, 6, 8, 16, 64),
+    seeds=(0, 1, 2),
+    horizon: int = 2,
+    tail: int = 2,
+    n_ctx: int = 8,
+    n_steps: int = 10_000,
+    n_fit: int = 4000,
+    n_test: int = 4000,
+    converged_tol: float = 0.02,
+    device=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Does minimality emerge when residual bandwidth is scarce?
+
+    With d_model=64 the model retains the spent coin — unsurprising: the stream has
+    ~60 spare dimensions and the loss has no forgetting term. This sweep shrinks
+    ONLY the residual stream (d_model, with d_head=min(8, d_model); the MLP stays
+    at width 256 so compute stays generous and the squeeze is specifically on
+    representational bandwidth) and asks where, if anywhere, the per-position state
+    converges to the minimal belief and drops the spent coin.
+
+    The essential control is the loss gap: a retention drop only counts as
+    *emergent minimality* at widths where the model still reaches the optimal
+    floor. (Failing to learn the task at all would also kill retention, for the
+    boring reason.) Each (width, seed) record is written incrementally.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = horizon + tail
+    floor = _mixture_floor_nats(process, n_ctx, seed=999)
+    records = []
+    json_path = results_dir / "mixture_capacity_sweep.json"
+
+    for w in widths:
+        for seed in seeds:
+            try:
+                arch = ArchConfig.paper(process, n_ctx=n_ctx, seed=seed,
+                                        d_model=w, d_head=min(8, w))
+                cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=n_steps, seed=seed)
+                result = train(process, arch, cfg, verbose=False,
+                               init_states_fn=process.aligned_init_states,
+                               process_name=f"mix-cap(w={w},s={seed})")
+                model = result.model
+                loss = _eval_aligned_loss(model, process, n_ctx, device)
+                fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+                test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+                _, acc = probe_label_by_position(model, fit.tokens, fit.z_first,
+                                                 test.tokens, test.z_first)
+                # Needed-info control: the *current* (second-epoch) coin at the last
+                # position, which any converged model must carry.
+                Xf = _residuals_3d(model, fit.tokens)[:, -1, :]
+                Xt = _residuals_3d(model, test.tokens)[:, -1, :]
+                cur = LogisticRegression(max_iter=2000).fit(Xf, fit.z_labels[:, -1])
+                cur_acc = accuracy_score(test.z_labels[:, -1], cur.predict(Xt))
+
+                prefix, revealed, retention = acc[:horizon], acc[horizon:epoch_len], acc[epoch_len:]
+                rec = {
+                    "d_model": w, "seed": seed, "d_head": min(8, w),
+                    "n_params": int(sum(p.numel() for p in model.parameters())),
+                    "loss_nats": round(loss, 4), "floor_nats": round(floor, 4),
+                    "gap_nats": round(loss - floor, 4),
+                    "converged": bool(loss - floor < converged_tol),
+                    "mean_prefix_acc": float(prefix.mean()),
+                    "mean_revealed_acc": float(revealed.mean()),
+                    "mean_retention_acc": float(retention.mean()),
+                    "current_coin_acc_last": float(cur_acc),
+                    "accuracy_by_position": [round(float(a), 4) for a in acc],
+                }
+                records.append(rec)
+                print(f"[cap] w={w:>2} seed={seed} gap={loss-floor:+.4f} "
+                      f"conv={rec['converged']} retention={rec['mean_retention_acc']:.3f} "
+                      f"current={cur_acc:.3f}", flush=True)
+                del model, result, fit, test
+            except Exception as e:
+                records.append({"d_model": w, "seed": seed, "error": repr(e)})
+                print(f"[cap] w={w} seed={seed} FAILED: {e!r}", flush=True)
+            if save:
+                _write_metrics({"floor_nats": floor, "records": records}, json_path)
+
+    ok = [r for r in records if "error" not in r]
+    by_w = {}
+    for w in widths:
+        rs_all = [r for r in ok if r["d_model"] == w]
+        if not rs_all:
+            continue
+        conv = [r for r in rs_all if r["converged"]]
+        rs = conv or rs_all  # stats from converged runs when any exist
+        ret = np.array([r["mean_retention_acc"] for r in rs])
+        gaps = np.array([r["gap_nats"] for r in rs_all])
+        by_w[w] = {
+            "retention_mean": float(ret.mean()), "retention_std": float(ret.std()),
+            "revealed": float(np.mean([r["mean_revealed_acc"] for r in rs])),
+            "prefix": float(np.mean([r["mean_prefix_acc"] for r in rs])),
+            "current_coin": float(np.mean([r["current_coin_acc_last"] for r in rs])),
+            "gap_mean": float(gaps.mean()), "gap_std": float(gaps.std()),
+            "n_converged": len(conv), "n_runs": len(rs_all),
+        }
+
+    summary = {
+        "config": {"widths": list(widths), "seeds": list(seeds), "horizon": horizon,
+                   "tail": tail, "n_ctx": n_ctx, "n_steps": n_steps,
+                   "converged_tol": converged_tol, "d_mlp": "256 (fixed, deliberately)"},
+        "floor_nats": floor,
+        "by_width": {str(w): by_w[w] for w in by_w},
+        "records": records,
+    }
+    if save and by_w:
+        viz.plot_capacity_pressure(
+            by_w, converged_tol, len(seeds),
+            save_path=results_dir / "mixture_capacity_pressure.png")
+        summary["figure"] = _rel(results_dir / "mixture_capacity_pressure.png")
+        _write_metrics(summary, results_dir / "mixture_capacity_summary.json")
+    return summary

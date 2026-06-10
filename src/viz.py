@@ -367,6 +367,55 @@ def plot_direction_transfer(positions, perpos_acc, transfer_acc, horizon, epoch_
     return fig
 
 
+def plot_capacity_pressure(by_w, tol, n_seeds, save_path=None, title=None):
+    """Two stacked panels vs residual width d_model (log x):
+    top — retention of the spent coin (mean ± seeds), with the revealed-region and
+    prefix-control references; bottom — gap to the optimal loss floor (convergence
+    check, with the tolerance line). Widths where not every seed converged are drawn
+    with open markers: a retention drop only counts as *minimality* where the gap
+    panel shows the task was still learned."""
+    ws = sorted(by_w)
+    ret_m = [by_w[w]["retention_mean"] for w in ws]
+    ret_s = [by_w[w]["retention_std"] for w in ws]
+    rev = [by_w[w]["revealed"] for w in ws]
+    pre = [by_w[w]["prefix"] for w in ws]
+    gap_m = [by_w[w]["gap_mean"] for w in ws]
+    gap_s = [by_w[w]["gap_std"] for w in ws]
+    full = [by_w[w]["n_converged"] == n_seeds for w in ws]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.5, 7.2), sharex=True,
+                                   gridspec_kw={"height_ratios": [3, 1.6]})
+    ax1.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax1.plot(ws, rev, marker="s", color="0.45", ls="--", lw=1.2,
+             label="epoch 1, after reveal")
+    ax1.plot(ws, pre, marker="^", color="0.75", ls=":", lw=1, label="prefix (control)")
+    ax1.errorbar(ws, ret_m, yerr=ret_s, color="C3", lw=2, capsize=3, zorder=3,
+                 label="retention (epoch ≥ 2)")
+    for w, m, f in zip(ws, ret_m, full):
+        ax1.plot([w], [m], marker="o", ms=7, mfc=("C3" if f else "white"),
+                 mec="C3", zorder=4)
+    ax1.set_ylabel("decode spent coin (accuracy)")
+    ax1.set_ylim(0.4, 1.05)
+    ax1.legend(fontsize=8.5, loc="lower right")
+    ax1.grid(alpha=0.2)
+    ax1.set_title(title or "Does minimality emerge under residual-bandwidth pressure?")
+
+    ax2.axhline(tol, color="k", ls="--", lw=1, label=f"convergence tol ({tol} nats)")
+    ax2.errorbar(ws, gap_m, yerr=gap_s, marker="o", color="C0", lw=1.6, capsize=3,
+                 label="gap to optimal floor")
+    ax2.set_xscale("log", base=2)
+    ax2.set_xticks(ws)
+    ax2.set_xticklabels([str(w) for w in ws])
+    ax2.set_xlabel("residual stream width  d_model")
+    ax2.set_ylabel("loss gap (nats)")
+    ax2.legend(fontsize=8.5)
+    ax2.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
 def plot_ablation_loss(pred_positions, clean, ablate_used, ablate_retained,
                        use_pos, epoch_len, save_path=None, title=None):
     """Per-position next-token loss under three conditions: clean, ablate the coin
