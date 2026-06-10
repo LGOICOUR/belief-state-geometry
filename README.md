@@ -197,6 +197,20 @@ target, so this reuses the Phase-1 abstractions unchanged. Full method, geometry
 caveats: [`docs/phase2.md`](docs/phase2.md). Reproduce via the
 `experiments.run_mixture_*` / `causal_ablation` / `capacity_pressure_sweep` functions.
 
+## Side experiment — the norm is not a confidence channel
+
+Belief content is *directional*; does the residual's L2 **norm** carry the model's
+*uncertainty*? Within-position correlations against the analytic entropies say no.
+Mess3 shows a moderate norm–confidence correlation, but its belief- and next-token
+entropies are rank-identical (ρ = 0.999), so it cannot say which one the norm tracks.
+RRXOR pulls them apart (ρ = −0.07) and is decisive: the final-layer norm tracks
+**next-token (output) entropy** (mean ρ ≈ +0.68; 0.86–0.92 at mid positions) while the
+correlation with **belief** entropy stays ≈ 0 at every layer. Consistent with the
+LayerNorm null — every reader of the stream normalises scale away — so uncertainty,
+like content, lives in direction
+([`results/norm_confidence_rrxor.png`](results/norm_confidence_rrxor.png),
+[`results/metrics_norm_confidence.json`](results/metrics_norm_confidence.json)).
+
 ## References
 
 - Shai, Marzen, Teixeira, Gietelink Oldenziel, Riechers (2024). *Transformers Represent
