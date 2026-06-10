@@ -187,10 +187,15 @@ memory (it is *finer-grained than the causal state*), while still predicting opt
   its decodability 1.0 → 0.50 yet leaves next-token loss unchanged, while the *same*
   ablation where the coin **is** used spikes the loss
   ([`results/mixture_ablation.png`](results/mixture_ablation.png)).
-- **Not merely spare capacity** — shrinking the residual width to the edge of learnability
-  does not induce forgetting (the latent stays re-readable in-context), so minimality does
-  not emerge from bandwidth pressure
-  ([`results/mixture_capacity_pressure.png`](results/mixture_capacity_pressure.png)).
+- **Retention is load-dependent** — with a *single* spent coin in context, shrinking the
+  residual width induces no forgetting (it stays re-readable;
+  [`mixture_capacity_pressure.png`](results/mixture_capacity_pressure.png)). But over a
+  6-epoch context a full-width model holds a near-complete **ledger** of all five past
+  coins, while a narrow model (`d_model=8`) sheds the **oldest** first and protects the
+  live one — the first forgetting in this study
+  ([`retention_ledger_w8.png`](results/retention_ledger_w8.png)). So the model keeps
+  useless latents *when it can afford to*, and moves toward minimality under
+  representational load.
 
 The mixture is just another `Process` and "which generator" is just another probe
 target, so this reuses the Phase-1 abstractions unchanged. Full method, geometry, and

@@ -2,11 +2,13 @@
 
 > **Status: built (P0–P5) and validated.** This document is the design/method spec;
 > the construction, retention probe, horizon×seed sweep, direction/depth geometry,
-> causal ablation, and capacity-pressure sweep are all implemented in `src/` and
+> causal ablation, capacity-pressure sweep, and a multi-epoch retention ledger are all
+> implemented in `src/` and
 > reproduced in `results/` (figures linked from the README). Headline: the residual is
 > **super-sufficient** — it retains a predictively-defunct latent that the minimal
 > belief discards, robustly (5 horizons × 3 seeds) and causally-inertly (ablation),
-> and not removed by capacity pressure. Honest caveats are kept in §4 and §7.
+> and removed only under load (kept under width alone; forgotten oldest-first under
+> multi-epoch load — the retention ledger). Honest caveats are kept in §4 and §7.
 
 ## Abstract
 
