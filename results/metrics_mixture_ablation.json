@@ -1,0 +1,47 @@
+{
+  "process": "mixture(h=2,tail=2)",
+  "n_ctx": 8,
+  "use_position": 2,
+  "retention_positions": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "clean_loss_by_position": [
+    0.6932,
+    0.6931,
+    0.0,
+    0.6932,
+    0.6933,
+    0.6931,
+    0.0
+  ],
+  "ablate_retained_loss_by_position": [
+    0.6932,
+    0.6931,
+    0.0,
+    0.6932,
+    0.7256,
+    0.6972,
+    0.0001
+  ],
+  "ablate_used_loss_by_position": [
+    0.6932,
+    0.6931,
+    0.695,
+    0.6932,
+    0.6933,
+    0.6931,
+    0.0
+  ],
+  "total_loss_clean": 0.4951,
+  "total_loss_ablate_retained": 0.5003,
+  "total_loss_ablate_used": 0.5944,
+  "delta_at_use_position": 0.6949,
+  "max_abs_delta_retention": 0.0323,
+  "z_first_decode_at_retention_clean": 1.0,
+  "z_first_decode_at_retention_ablated": 0.5035,
+  "interpretation": "Ablating the retained coin (epoch>=2) leaves next-token loss unchanged while it is fully removed (decodability -> chance), yet ablating the same coin where it is USED (the reveal) spikes the loss. => the retained copy is decodable but causally inert: the model is an optimal predictor carrying genuinely non-minimal information.",
+  "figure": "results/mixture_ablation.png"
+}

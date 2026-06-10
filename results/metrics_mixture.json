@@ -1,0 +1,46 @@
+{
+  "process": "mixture(h=2,tail=2)",
+  "seed": 0,
+  "config": {
+    "horizon": 2,
+    "tail": 2,
+    "epoch_len": 4,
+    "n_ctx": 8
+  },
+  "training": {
+    "final_loss_nats": 0.49511927366256714,
+    "optimal_in_context_loss_nats": 0.49510512897138936,
+    "loss_gap_to_floor_nats": 1.4144691177775393e-05,
+    "entropy_rate_bits": 0.75
+  },
+  "retention_probe": {
+    "accuracy_by_position": [
+      0.5035,
+      0.4942,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "upper_bound_by_position": [
+      0.5,
+      0.5,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "mean_prefix_accuracy": 0.4988333333333333,
+    "mean_revealed_accuracy": 1.0,
+    "mean_retention_accuracy": 1.0,
+    "interpretation": "First-epoch generator label decoded from the residual at each position. Chance (~0.5) before the reveal; ~1.0 once the indicator is in the input. In epoch >= 2 the label is neither in the current input nor predictively needed, so the retention accuracy (1.000) is the result: ~0.5 = discards predictively-useless identity (pure predictive sufficiency); near the upper bound = retains it (extra mechanistic memory)."
+  },
+  "figures": {
+    "decodability": "results/mixture_decodability.png",
+    "training_curve": "results/mixture_training_curve.png"
+  }
+}

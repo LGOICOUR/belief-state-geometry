@@ -1,0 +1,40 @@
+{
+  "process": "mixture(h=2,tail=2)",
+  "position": 4,
+  "n_layers": 4,
+  "layer_accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "layer_cosine_matrix": [
+    [
+      1.0,
+      0.7281,
+      0.3246,
+      0.3145
+    ],
+    [
+      0.7281,
+      1.0,
+      0.4353,
+      0.4404
+    ],
+    [
+      0.3246,
+      0.4353,
+      1.0,
+      0.903
+    ],
+    [
+      0.3145,
+      0.4404,
+      0.903,
+      1.0
+    ]
+  ],
+  "mean_offdiag_cosine": 0.524332939301357,
+  "interpretation": "Per-layer decode of the coin at a retention position and cross-layer cosine. High off-diagonal cosine => consistent direction across depth (refusal-like). resid_post is cumulative, so accuracy is ~monotone in depth.",
+  "figure": "results/mixture_depth_geometry.png"
+}

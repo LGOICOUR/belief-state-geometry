@@ -247,6 +247,256 @@ def plot_future_information(fi: dict, title=None, save_path=None, max_points=80_
     return fig
 
 
+def plot_generator_decodability(
+    positions, model_acc, upper_acc, horizon, epoch_len,
+    title=None, save_path=None,
+):
+    """Accuracy of decoding the *first* epoch's generator label vs token position.
+
+    The first epoch's Z is revealed at its first indicator (position ``horizon``)
+    and remains in the raw history afterwards (upper-bound curve). In later epochs
+    it is neither in the current input nor predictively needed, so the model's
+    accuracy there measures **retention**: tracking the upper bound = the model
+    keeps predictively-useless identity; dropping to chance = it discards it.
+    """
+    positions = np.asarray(positions)
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    n_ep = (len(positions) + epoch_len - 1) // epoch_len
+    if n_ep > 1:  # shade everything after the first epoch (the retention region)
+        ax.axvspan(epoch_len - 0.5, len(positions) - 0.5, color="C0", alpha=0.07,
+                   label="retention region (epoch ≥ 2)")
+    for e in range(1, n_ep):
+        ax.axvline(e * epoch_len - 0.5, color="0.85", lw=1)
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax.plot(positions, upper_acc, color="k", ls="--", lw=1.4, marker="s", ms=4,
+            label="upper bound (label is in history)")
+    ax.plot(positions, model_acc, color="C3", lw=2, marker="o", ms=5,
+            label="model residual (linear probe)")
+    ax.axvline(horizon, color="C2", lw=1.2, ls="-.", alpha=0.7,
+               label=f"reveal (position {horizon})")
+    ax.set_xlabel("token position")
+    ax.set_ylabel("decode first-epoch generator (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_xticks(list(positions))
+    ax.set_title(title or "Mixture: where is the generator label represented?")
+    ax.legend(fontsize=8.5, loc="lower left", ncol=2)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_retention_vs_horizon(by_i, save_path=None, title=None):
+    """Mean retention accuracy (decode spent coin in epoch >= 2) vs divergence horizon,
+    with seed error bars; reference curves for the post-reveal and prefix regimes."""
+    iv = sorted(by_i)
+    means = [by_i[i]["mean"] for i in iv]
+    stds = [by_i[i]["std"] for i in iv]
+    rev = [by_i[i]["revealed"] for i in iv]
+    pre = [by_i[i]["prefix"] for i in iv]
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax.plot(iv, rev, marker="s", color="0.45", ls="--", lw=1.2, label="epoch 1, after reveal")
+    ax.errorbar(iv, means, yerr=stds, marker="o", color="C3", capsize=3, lw=2,
+                label="retention (epoch ≥ 2)")
+    ax.plot(iv, pre, marker="^", color="0.7", ls=":", lw=1, label="prefix (control)")
+    ax.set_xscale("log")
+    ax.set_xticks(iv)
+    ax.set_xticklabels([str(i) for i in iv])
+    ax.set_xlabel("divergence horizon  i")
+    ax.set_ylabel("decode first-epoch coin (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_title(title or "Retention of the spent coin vs. horizon (± seeds)")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_retention_decay(decay_by_i, save_path=None, title=None):
+    """Decode accuracy vs. tokens-since-reveal, one curve per horizon (seed-averaged).
+    Flat near the upper bound = no decay (persistent memory); a downward slope = decay."""
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    for i in sorted(decay_by_i):
+        x, acc = decay_by_i[i]
+        ax.plot(x, acc, marker=".", lw=1.5, label=f"i={i}")
+    ax.axvline(0, color="C2", ls="-.", lw=1, alpha=0.6)
+    ax.set_xlabel("tokens since the first-epoch coin was revealed")
+    ax.set_ylabel("decode coin (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_title(title or "Does the retained coin decay with distance?")
+    ax.legend(fontsize=8, ncol=3)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_direction_transfer(positions, perpos_acc, transfer_acc, horizon, epoch_len,
+                            save_path=None, title=None):
+    """Per-position probe vs. the reveal-position probe transferred to other positions.
+    If the transferred probe keeps working in epoch >= 2, the coin is carried in the
+    *same* direction (one persistent representation), not re-encoded position by position."""
+    positions = np.asarray(positions)
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    n_ep = (len(positions) + epoch_len - 1) // epoch_len
+    if n_ep > 1:
+        ax.axvspan(epoch_len - 0.5, len(positions) - 0.5, color="C0", alpha=0.07,
+                   label="retention region (epoch ≥ 2)")
+    ax.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax.plot(positions, perpos_acc, marker="o", color="C3", lw=2,
+            label="probe trained per position")
+    ax.plot(positions, transfer_acc, marker="s", color="C0", lw=1.6, ls="--",
+            label="reveal-position probe, transferred")
+    ax.axvline(horizon, color="C2", ls="-.", lw=1, alpha=0.7, label=f"reveal (pos {horizon})")
+    ax.set_xlabel("token position")
+    ax.set_ylabel("decode first-epoch coin (accuracy)")
+    ax.set_ylim(0.4, 1.03)
+    ax.set_xticks(list(positions))
+    ax.set_title(title or "Is the coin carried in the same direction?")
+    ax.legend(fontsize=8.5, loc="lower left", ncol=2)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_capacity_pressure(by_w, tol, n_seeds, save_path=None, title=None):
+    """Two stacked panels vs residual width d_model (log x):
+    top — retention of the spent coin (mean ± seeds), with the revealed-region and
+    prefix-control references; bottom — gap to the optimal loss floor (convergence
+    check, with the tolerance line). Widths where not every seed converged are drawn
+    with open markers: a retention drop only counts as *minimality* where the gap
+    panel shows the task was still learned."""
+    ws = sorted(by_w)
+    ret_m = [by_w[w]["retention_mean"] for w in ws]
+    ret_s = [by_w[w]["retention_std"] for w in ws]
+    rev = [by_w[w]["revealed"] for w in ws]
+    pre = [by_w[w]["prefix"] for w in ws]
+    gap_m = [by_w[w]["gap_mean"] for w in ws]
+    gap_s = [by_w[w]["gap_std"] for w in ws]
+    full = [by_w[w]["n_converged"] == n_seeds for w in ws]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.5, 7.2), sharex=True,
+                                   gridspec_kw={"height_ratios": [3, 1.6]})
+    ax1.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax1.plot(ws, rev, marker="s", color="0.45", ls="--", lw=1.2,
+             label="epoch 1, after reveal")
+    ax1.plot(ws, pre, marker="^", color="0.75", ls=":", lw=1, label="prefix (control)")
+    ax1.errorbar(ws, ret_m, yerr=ret_s, color="C3", lw=2, capsize=3, zorder=3,
+                 label="retention (epoch ≥ 2)")
+    for w, m, f in zip(ws, ret_m, full):
+        ax1.plot([w], [m], marker="o", ms=7, mfc=("C3" if f else "white"),
+                 mec="C3", zorder=4)
+    ax1.set_ylabel("decode spent coin (accuracy)")
+    ax1.set_ylim(0.4, 1.05)
+    ax1.legend(fontsize=8.5, loc="lower right")
+    ax1.grid(alpha=0.2)
+    ax1.set_title(title or "Does minimality emerge under residual-bandwidth pressure?")
+
+    ax2.axhline(tol, color="k", ls="--", lw=1, label=f"convergence tol ({tol} nats)")
+    ax2.errorbar(ws, gap_m, yerr=gap_s, marker="o", color="C0", lw=1.6, capsize=3,
+                 label="gap to optimal floor")
+    ax2.set_xscale("log", base=2)
+    ax2.set_xticks(ws)
+    ax2.set_xticklabels([str(w) for w in ws])
+    ax2.set_xlabel("residual stream width  d_model")
+    ax2.set_ylabel("loss gap (nats)")
+    ax2.legend(fontsize=8.5)
+    ax2.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_ablation_loss(pred_positions, clean, ablate_used, ablate_retained,
+                       use_pos, epoch_len, save_path=None, title=None):
+    """Per-position next-token loss under three conditions: clean, ablate the coin
+    where it is *used* (positive control — should spike), and ablate the *retained*
+    coin in epoch >= 2 (should match clean if the retained copy is causally inert)."""
+    x = np.asarray(pred_positions)
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    n_ep = (epoch_len + len(x)) // epoch_len
+    ax.axvspan(epoch_len - 0.5, x.max() + 0.5, color="C0", alpha=0.06,
+               label="retention region (epoch ≥ 2)")
+    ax.plot(x, clean, marker="o", color="0.3", lw=2, label="clean")
+    ax.plot(x, ablate_retained, marker="s", color="C0", lw=1.6, ls="--",
+            label="ablate retained coin (epoch ≥ 2)")
+    ax.plot(x, ablate_used, marker="^", color="C3", lw=1.6, ls=":",
+            label=f"ablate coin @ pos {use_pos} (used — control)")
+    ax.set_xlabel("prediction position (predict token p+1)")
+    ax.set_ylabel("cross-entropy (nats)")
+    ax.set_xticks(list(x))
+    ax.set_title(title or "Causal ablation: is the retained coin actually used?")
+    ax.legend(fontsize=8.5)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_transfer_cosine_matrices(transfer, cosine, epoch_len, save_path=None, title=None):
+    """Heatmaps of position->position probe-transfer accuracy and coin-direction cosine.
+    A bright off-diagonal block among epoch>=2 positions = one shared retained
+    direction; a dark off-diagonal = the coin is re-encoded per position."""
+    transfer, cosine = np.asarray(transfer), np.asarray(cosine)
+    L = transfer.shape[0]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+    for ax, M, name, vmin in ((axes[0], transfer, "transfer accuracy", 0.5),
+                              (axes[1], cosine, "direction cosine", -1.0)):
+        im = ax.imshow(M, origin="lower", cmap="viridis", vmin=vmin, vmax=1.0)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+        ax.set_xlabel("evaluated at position")
+        ax.set_ylabel("probe trained at position")
+        ax.set_title(name, fontsize=10)
+        ax.set_xticks(range(L)); ax.set_yticks(range(L))
+        ax.axvline(epoch_len - 0.5, color="w", lw=1)
+        ax.axhline(epoch_len - 0.5, color="w", lw=1)
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
+def plot_depth_consistency(layers, layer_acc, layer_cos, position, save_path=None, title=None):
+    """Left: per-layer decode accuracy of the coin at a fixed (retention) position.
+    Right: cross-layer cosine of the coin direction. High off-diagonal cosine = a
+    consistent direction across depth (refusal-like); low = depth-specific encoding."""
+    layers = list(layers)
+    layer_cos = np.asarray(layer_cos)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+    axes[0].plot(layers, layer_acc, marker="o", color="C3", lw=2)
+    axes[0].axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    axes[0].set_xlabel("layer (resid_post)")
+    axes[0].set_ylabel("decode coin (accuracy)")
+    axes[0].set_ylim(0.4, 1.03)
+    axes[0].set_xticks(layers)
+    axes[0].grid(alpha=0.2)
+    axes[0].set_title(f"per-layer, position {position}", fontsize=10)
+    axes[0].legend(fontsize=8)
+    im = axes[1].imshow(layer_cos, origin="lower", cmap="viridis", vmin=-1, vmax=1)
+    fig.colorbar(im, ax=axes[1], fraction=0.046)
+    axes[1].set_xlabel("layer"); axes[1].set_ylabel("layer")
+    axes[1].set_title("direction cosine across depth", fontsize=10)
+    axes[1].set_xticks(layers); axes[1].set_yticks(layers)
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig
+
+
 def _save(fig, save_path, dark=False):
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)

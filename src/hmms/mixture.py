@@ -1,35 +1,45 @@
-"""PHASE 2 STUB -- meta-process mixtures of two HMMs. *Interface only; no behaviour.*
+"""Phase 2: the mixture process for the belief-state collapse experiment.
 
-This module is intentionally not implemented in Phase 1. It exists now so that the
-rest of the codebase can be written against the abstractions Phase 2 will need,
-and so reviewers can see the planned extension is a drop-in, not a rewrite.
+A **mixture process** interleaves two generators, ``A`` and ``B``, that are
+*predictively identical* for a tunable horizon and then diverge. It is a single
+:class:`Process` (a labeled transition tensor), so all the Phase-1 belief
+machinery -- ``stationary``, ``belief_update``, ``belief_trajectory``, MSP
+enumeration, entropy rate -- works on it unchanged. The only new piece is the
+**generator marginal** ``P(Z = A | history)``, the "which generator" probe target.
 
-Phase-2 experiment (out of scope for this build)
------------------------------------------------
-Combine two sub-processes A and B into a single meta-process whose hidden-state
-space is the tagged union ``{(A, s) : s in A.states} ∪ {(B, s) : s in B.states}``.
-The generator label (A vs B) is itself a hidden variable the optimal observer
-must infer. Construct *pairs* (A, B) that are statistically identical for the
-first ``i`` symbols of look-ahead and only diverge afterwards
-(``i in {1, 2, 5, 10, 20}``). The question: does the transformer's residual
-stream *collapse* mechanistically-distinct generators onto the same belief-space
-point until predictive equivalence breaks at horizon ``i``?
+Construction
+------------
+The stream is a sequence of fixed-length **epochs** of length ``horizon + tail``.
+Each epoch draws a fresh fair generator label ``Z in {A, B}`` and emits:
 
-Because ``Mixture`` is a ``Process`` like any other, the existing
-``data.sample_*`` pipeline and the existing belief machinery (``belief_update``,
-``belief_trajectory``, MSP enumeration) all work on it unchanged. The only new
-piece is a *probe target*: instead of (or in addition to) regressing residuals
-onto the full belief, regress onto the **marginal belief over the generator
-label** -- the "which generator" target -- via ``which_generator_target`` below.
+* positions ``1 .. horizon``            -- a uniform random bit (identical under A and B);
+* positions ``horizon+1 .. horizon+tail`` -- ``Z``'s **indicator** bit
+  (``A -> 0``, ``B -> 1``), emitted deterministically.
 
-Key design point that makes this a drop-in
-------------------------------------------
-A ``Mixture`` builds a block transition tensor of shape
-``[n_symbols, nA + nB, nA + nB]``. If the two generators never switch into each
-other, the blocks are independent under the dynamics, but the *observer's belief*
-still spreads mass across both blocks and concentrates over time -- which is the
-phenomenon under study. Marginalising a meta-belief over the two blocks yields
-``P(generator = A | history)``.
+At the epoch boundary ``Z`` is resampled. Hence A and B are statistically
+indistinguishable for the first ``horizon`` steps (both uniform), and predictive
+equivalence breaks at step ``horizon + 1`` (the first indicator).
+
+Why a ``tail >= 2`` (and not a single reveal)
+---------------------------------------------
+If the divergence were a *single* token at ``horizon+1`` that also ended the
+epoch, the generator label would become predictively irrelevant the instant it
+is revealed, so the optimal belief would never actually *commit* to it -- there
+would be no regime in which representing ``Z`` is predictively *necessary*, only
+the question of whether the model *retains* an already-useless fact. A short
+``Z``-dependent tail fixes this: during the tail (positions ``horizon+1`` ..
+``horizon+tail``) ``Z`` is both **known** (revealed by the first indicator) and
+**still predictive** (it determines the remaining indicators), so the optimal
+belief legitimately commits. The subsequent epoch reset then makes ``Z``
+irrelevant, which is where the *retention* question (experiment E3) lives. So
+``tail >= 2`` cleanly separates "represents the predictive belief" (E1/E2) from
+"retains predictively-useless identity" (E3).
+
+What the optimal observer does (epoch-aligned)
+----------------------------------------------
+``P(Z = A | history)`` is ``1/2`` through the random prefix (no evidence),
+jumps to ``0`` or ``1`` at the first indicator (the **bifurcation**), holds
+through the tail, and resets to ``1/2`` at the next epoch (``Z`` discarded).
 """
 
 from __future__ import annotations
@@ -38,32 +48,120 @@ import numpy as np
 
 from .base import Process
 
-_NOT_IMPLEMENTED = (
-    "hmms.mixture is a Phase-2 stub: interface only, no behaviour in this build. "
-    "See the module docstring for the planned design."
-)
+# Generator labels and the bit each emits in its tail.
+GEN_A, GEN_B = 0, 1
+_INDICATOR = {GEN_A: 0, GEN_B: 1}  # A's tail is all 0s, B's tail is all 1s
 
 
-class Mixture(Process):
-    """PHASE 2 STUB. Meta-process over two sub-processes A and B.
+def mixture_tensor(horizon: int, tail: int = 2):
+    """Build ``(T, state_names, generator_of_state)`` for the mixture process.
 
-    Intended signature (subject to Phase-2 refinement)::
+    Parameters
+    ----------
+    horizon: number of shared uniform-random bits per epoch (>= 1). This is the
+        divergence horizon ``i``: A and B are identical for these steps.
+    tail:    number of ``Z``-indicator bits per epoch (>= 1; use >= 2 so the
+        belief commits -- see the module docstring).
 
-        Mixture(process_a, process_b, prior_a=0.5, allow_switching=False)
+    Returns
+    -------
+    T : ``[2, n_states, n_states]`` labeled transition tensor.
+    state_names : human-readable labels, e.g. ``"A.pre1"``, ``"B.tail2"``.
+    generator_of_state : ``[n_states]`` int array, ``GEN_A``/``GEN_B`` per state.
 
-    where ``prior_a`` is the observer's prior probability that the generator is A.
-    Constructs a block transition tensor and hands it to ``Process.__init__``, so
-    every inherited belief method then works without modification.
+    State layout (generator-major, so the first half are A-states):
+        A.pre1 .. A.pre{horizon}, A.tail1 .. A.tail{tail},
+        B.pre1 .. B.pre{horizon}, B.tail1 .. B.tail{tail}.
+    """
+    if horizon < 1:
+        raise ValueError("horizon must be >= 1")
+    if tail < 1:
+        raise ValueError("tail must be >= 1")
+
+    per_gen = horizon + tail            # states per generator
+    n_states = 2 * per_gen
+    n_symbols = 2
+
+    def pre(Z, pos):                    # pos in 1..horizon
+        return Z * per_gen + (pos - 1)
+
+    def tl(Z, k):                       # k in 1..tail
+        return Z * per_gen + horizon + (k - 1)
+
+    T = np.zeros((n_symbols, n_states, n_states), dtype=np.float64)
+    for Z in (GEN_A, GEN_B):
+        # Prefix: emit a uniform random bit, advance the phase. Both bits lead to
+        # the same next state, so the prefix carries no information about Z.
+        for pos in range(1, horizon + 1):
+            nxt = pre(Z, pos + 1) if pos < horizon else tl(Z, 1)
+            for x in (0, 1):
+                T[x, pre(Z, pos), nxt] += 0.5
+        # Tail: emit Z's indicator deterministically.
+        ind = _INDICATOR[Z]
+        for k in range(1, tail + 1):
+            if k < tail:
+                T[ind, tl(Z, k), tl(Z, k + 1)] += 1.0
+            else:  # epoch boundary: resample Z fairly
+                T[ind, tl(Z, k), pre(GEN_A, 1)] += 0.5
+                T[ind, tl(Z, k), pre(GEN_B, 1)] += 0.5
+
+    state_names: list[str] = []
+    generator_of_state = np.empty(n_states, dtype=int)
+    for Z in (GEN_A, GEN_B):
+        tag = "A" if Z == GEN_A else "B"
+        for pos in range(1, horizon + 1):
+            generator_of_state[pre(Z, pos)] = Z
+            state_names.append(f"{tag}.pre{pos}")
+        for k in range(1, tail + 1):
+            generator_of_state[tl(Z, k)] = Z
+            state_names.append(f"{tag}.tail{k}")
+    return T, state_names, generator_of_state
+
+
+class MixtureProcess(Process):
+    """Two generators, predictively identical for ``horizon`` steps then divergent.
+
+    The generator label ``Z`` is resampled fairly each epoch. Use
+    :meth:`generator_marginal` to get the "which generator" probe target
+    ``P(Z = A | belief)`` from any belief (single or batched).
     """
 
-    def __init__(self, process_a: Process, process_b: Process, prior_a: float = 0.5,
-                 allow_switching: bool = False):
-        raise NotImplementedError(_NOT_IMPLEMENTED)
+    def __init__(self, horizon: int = 2, tail: int = 2):
+        T, state_names, gen_of_state = mixture_tensor(horizon, tail)
+        super().__init__(
+            T,
+            symbol_names=["0", "1"],
+            state_names=state_names,
+            name=f"Mixture(h={horizon},tail={tail})",
+        )
+        self.horizon = horizon
+        self.tail = tail
+        self.epoch_len = horizon + tail
+        self.generator_of_state = gen_of_state          # 0 (A) / 1 (B) per state
+        self._gen_a_mask = gen_of_state == GEN_A
+        # The two epoch-start states (pre1 of each generator), for aligned seeding.
+        self.epoch_start_states = (0, self.epoch_len)    # pre(A,1), pre(B,1)
 
+    def generator_marginal(self, belief: np.ndarray) -> np.ndarray:
+        """``P(generator = A | belief)``. Accepts belief shape ``[..., n_states]``;
+        returns shape ``[...]`` (a scalar for a single belief)."""
+        belief = np.asarray(belief, dtype=np.float64)
+        return belief[..., self._gen_a_mask].sum(axis=-1)
 
-def which_generator_target(meta_belief: np.ndarray, n_states_a: int) -> np.ndarray:
-    """PHASE 2 STUB. Marginalise a meta-belief to ``[P(gen=A), P(gen=B)]``.
+    def epoch_start_belief(self) -> np.ndarray:
+        """Optimal belief at an epoch boundary: 1/2 on each generator's first state.
 
-    The first ``n_states_a`` entries of ``meta_belief`` correspond to generator A.
-    """
-    raise NotImplementedError(_NOT_IMPLEMENTED)
+        This is the correct prior for *epoch-aligned* analysis (the observer knows
+        the phase from absolute position), as opposed to the stationary prior which
+        also averages over phase uncertainty.
+        """
+        b = np.zeros(self.n_states)
+        b[self.epoch_start_states[GEN_A]] = 0.5
+        b[self.epoch_start_states[GEN_B]] = 0.5
+        return b
+
+    def aligned_init_states(self, n_seqs: int, rng: np.random.Generator) -> np.ndarray:
+        """Initial hidden states for epoch-aligned sampling: a fair coin over the
+        two generators' epoch-start states, so every sequence begins a fresh epoch
+        and within-epoch phase equals ``position % epoch_len``."""
+        return rng.choice(self.epoch_start_states, size=n_seqs)

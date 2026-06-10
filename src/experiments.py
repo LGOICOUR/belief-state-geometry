@@ -16,17 +16,20 @@ import numpy as np
 import torch
 
 import beliefs as B
-from data import make_eval_set, get_device, sample_tokens
-from hmms import Mess3, RRXOR
+from data import make_eval_set, make_mixture_eval_set, get_device, sample_tokens
+from hmms import Mess3, RRXOR, MixtureProcess
+from model import ArchConfig
 from probe import (
     ProbeResult,
     cache_residuals,
     flatten_beliefs,
     probe_all_layers,
     probe_concat_layers,
+    probe_label_by_position,
+    _residuals_3d,
     best_layer,
 )
-from train import load_checkpoint
+from train import load_checkpoint, train, save_checkpoint, TrainConfig
 import viz
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -343,3 +346,672 @@ def future_information_analysis(
         "d_belief": d_belief,
         "d_nexttok": d_nexttok,
     }
+
+
+# ====================================================================== #
+# Phase 2: mixture process (belief-state collapse / retention)
+# ====================================================================== #
+def _mixture_floor_nats(process, seq_len, seed=999, n=30000):
+    """Epoch-aligned optimal in-context loss (nats): the apt floor for this model.
+
+    Like ``beliefs.optimal_in_context_loss`` but seeded at epoch boundaries and
+    using the epoch-aligned prior, matching how the mixture model is trained/evaluated.
+    """
+    rng = np.random.default_rng(seed)
+    init = process.aligned_init_states(n, rng)
+    em = process.sample_batch(n, seq_len, rng, init_states=init)
+    bel = process.belief_trajectory(em, start=process.epoch_start_belief())
+    nd = np.einsum("bli,xij->blx", bel, process.T)        # P(next | belief)
+    H = B.entropy(nd[:, :-1, :], axis=2, units="nats")    # predict t+1 from belief after t
+    return float(H.mean())
+
+
+@torch.no_grad()
+def _eval_aligned_loss(model, process, seq_len, device, n=8192):
+    """Held-out next-token loss (nats) on epoch-aligned sequences."""
+    rng = np.random.default_rng(777)
+    init = process.aligned_init_states(n, rng)
+    tok = sample_tokens(process, n, seq_len, rng, device, init_states=init)
+    model.eval()
+    return float(model(tok, return_type="loss").item())
+
+
+def run_mixture_experiment(
+    horizon: int = 2,
+    tail: int = 2,
+    n_ctx: int = 8,
+    n_steps: int = 8000,
+    n_fit: int = 6000,
+    n_test: int = 6000,
+    seed: int = 0,
+    device=None,
+    checkpoint_path=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Smallest end-to-end mixture experiment (retention probe).
+
+    Trains an epoch-aligned mixture model, then decodes the *first* epoch's
+    generator label from the residual stream at every position. Accuracy is at
+    chance before the reveal, high once the indicator is in the input, and -- in
+    epoch >= 2, where that label is neither in the input nor predictively needed --
+    measures **retention**: pure predictive sufficiency would discard it (chance),
+    extra mechanistic memory would keep it (near the upper bound).
+    """
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = process.epoch_len
+
+    # --- train (or load) ---
+    if checkpoint_path is not None and Path(checkpoint_path).exists():
+        model, ckpt = load_checkpoint(checkpoint_path, device)
+        history = ckpt.get("history", {"step": [], "loss": []})
+        ent_bits = ckpt.get("entropy_rate_bits", float("nan"))
+    else:
+        arch = ArchConfig.paper(process, n_ctx=n_ctx, seed=seed)
+        cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=n_steps, seed=seed)
+        result = train(process, arch, cfg, init_states_fn=process.aligned_init_states,
+                       process_name=f"mixture(h={horizon},tail={tail})")
+        model, history, ent_bits = result.model, result.history, result.entropy_rate_bits
+        if save:
+            out = checkpoint_path or (REPO_ROOT / "checkpoints" / f"mixture_h{horizon}_t{tail}.pt")
+            save_checkpoint(result, out)
+
+    floor = _mixture_floor_nats(process, n_ctx, seed=seed + 999)
+    held_loss = _eval_aligned_loss(model, process, n_ctx, device)
+
+    # --- retention probe: decode the first epoch's generator label by position ---
+    fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+    test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+    positions, model_acc = probe_label_by_position(
+        model, fit.tokens, fit.z_first, test.tokens, test.z_first
+    )
+    upper_acc = np.array([1.0 if p >= horizon else 0.5 for p in positions])
+
+    prefix = model_acc[:horizon]            # before reveal (control: ~0.5)
+    revealed = model_acc[horizon:epoch_len]  # epoch 1 after reveal (~1.0)
+    retention = model_acc[epoch_len:]        # epoch >= 2 (the result)
+    retention_mean = float(retention.mean()) if retention.size else float("nan")
+
+    figures = {}
+    fig_dec = viz.plot_generator_decodability(
+        positions, model_acc, upper_acc, horizon, epoch_len,
+        title=f"Mixture (horizon={horizon}, tail={tail}): generator label by position",
+        save_path=results_dir / "mixture_decodability.png" if save else None,
+    )
+    figures["decodability"] = _rel(results_dir / "mixture_decodability.png")
+    fig_curve = viz.plot_training_curve(
+        history, floor, ent_bits, title="Mixture: training loss vs analytic floor",
+        save_path=results_dir / "mixture_training_curve.png" if save else None,
+    )
+    figures["training_curve"] = _rel(results_dir / "mixture_training_curve.png")
+
+    metrics = {
+        "process": f"mixture(h={horizon},tail={tail})",
+        "seed": seed,
+        "config": {"horizon": horizon, "tail": tail, "epoch_len": epoch_len, "n_ctx": n_ctx},
+        "training": {
+            "final_loss_nats": held_loss,
+            "optimal_in_context_loss_nats": floor,
+            "loss_gap_to_floor_nats": held_loss - floor,
+            "entropy_rate_bits": ent_bits,
+        },
+        "retention_probe": {
+            "accuracy_by_position": [round(float(a), 4) for a in model_acc],
+            "upper_bound_by_position": [float(a) for a in upper_acc],
+            "mean_prefix_accuracy": float(prefix.mean()) if prefix.size else None,
+            "mean_revealed_accuracy": float(revealed.mean()) if revealed.size else None,
+            "mean_retention_accuracy": retention_mean,
+            "interpretation": (
+                "First-epoch generator label decoded from the residual at each position. "
+                "Chance (~0.5) before the reveal; ~1.0 once the indicator is in the input. "
+                "In epoch >= 2 the label is neither in the current input nor predictively "
+                f"needed, so the retention accuracy ({retention_mean:.3f}) is the result: "
+                "~0.5 = discards predictively-useless identity (pure predictive sufficiency); "
+                "near the upper bound = retains it (extra mechanistic memory)."
+            ),
+        },
+        "figures": figures,
+    }
+    if save:
+        _write_metrics(metrics, results_dir / "metrics_mixture.json")
+
+    return {
+        "metrics": metrics,
+        "positions": positions,
+        "model_acc": model_acc,
+        "upper_acc": upper_acc,
+        "figures": {"decodability": fig_dec, "training_curve": fig_curve},
+        "model": model,
+        "process": process,
+    }
+
+
+def run_mixture_sweep(
+    i_values=(1, 2, 5, 10, 20),
+    seeds=(0, 1, 2),
+    tail: int = 2,
+    n_steps: int = 8000,
+    n_fit: int = 3000,
+    n_test: int = 3000,
+    converged_tol: float = 0.02,
+    device=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Horizon x seed sweep of the retention probe (robustness for the claim).
+
+    For each (horizon i, seed): train ``MixtureProcess(i, tail)`` epoch-aligned with
+    ``n_ctx = 2*(i+tail)`` (two epochs), confirm the loss reaches the floor, and
+    decode the first-epoch coin by position. Records the decodability curve, the
+    onset (should track ``i``), and the mean retention accuracy in epoch >= 2.
+    Writes results incrementally so a partial run is still usable.
+    """
+    device = get_device(device)
+    records = []
+    json_path = results_dir / "mixture_sweep.json"
+
+    for i in i_values:
+        n_ctx = 2 * (i + tail)
+        epoch_len = i + tail
+        for seed in seeds:
+            try:
+                process = MixtureProcess(i, tail)
+                arch = ArchConfig.paper(process, n_ctx=n_ctx, seed=seed)
+                cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=n_steps, seed=seed)
+                result = train(process, arch, cfg, verbose=False,
+                               init_states_fn=process.aligned_init_states,
+                               process_name=f"mix(i={i},s={seed})")
+                model = result.model
+                floor = _mixture_floor_nats(process, n_ctx, seed=seed + 999)
+                loss = _eval_aligned_loss(model, process, n_ctx, device)
+                fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+                test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+                _, acc = probe_label_by_position(model, fit.tokens, fit.z_first,
+                                                 test.tokens, test.z_first)
+                prefix, revealed, retention = acc[:i], acc[i:epoch_len], acc[epoch_len:]
+                onset = int(np.argmax(acc >= 0.9)) if np.any(acc >= 0.9) else -1
+                rec = {
+                    "horizon": i, "seed": seed, "tail": tail, "n_ctx": n_ctx,
+                    "epoch_len": epoch_len, "loss_nats": round(loss, 4),
+                    "floor_nats": round(floor, 4), "gap_nats": round(loss - floor, 4),
+                    "converged": bool(loss - floor < converged_tol),
+                    "reveal_position": i, "onset_position": onset,
+                    "mean_prefix_acc": float(prefix.mean()) if prefix.size else None,
+                    "mean_revealed_acc": float(revealed.mean()) if revealed.size else None,
+                    "mean_retention_acc": float(retention.mean()) if retention.size else None,
+                    "accuracy_by_position": [round(float(a), 4) for a in acc],
+                }
+                records.append(rec)
+                print(f"[sweep] i={i:>2} seed={seed} n_ctx={n_ctx:>2} loss={loss:.4f} "
+                      f"gap={loss-floor:+.4f} onset={onset}(reveal={i}) "
+                      f"retention={rec['mean_retention_acc']:.3f}", flush=True)
+                del model, result, fit, test
+            except Exception as e:  # keep the sweep alive; record the failure
+                records.append({"horizon": i, "seed": seed, "error": repr(e)})
+                print(f"[sweep] i={i} seed={seed} FAILED: {e!r}", flush=True)
+            if save:
+                _write_metrics({"records": records}, json_path)
+
+    # ---- aggregate over seeds (prefer converged runs) ----
+    ok = [r for r in records if "error" not in r]
+    by_i, decay_by_i = {}, {}
+    for i in i_values:
+        rs_all = [r for r in ok if r["horizon"] == i]
+        rs = [r for r in rs_all if r["converged"]] or rs_all
+        if not rs:
+            continue
+        ret = np.array([r["mean_retention_acc"] for r in rs])
+        by_i[i] = {
+            "mean": float(ret.mean()), "std": float(ret.std()), "n_seeds": len(rs),
+            "revealed": float(np.mean([r["mean_revealed_acc"] for r in rs])),
+            "prefix": float(np.mean([r["mean_prefix_acc"] for r in rs])),
+            "onset_mean": float(np.mean([r["onset_position"] for r in rs])),
+            "all_converged": all(r["converged"] for r in rs_all),
+        }
+        accs = np.array([r["accuracy_by_position"] for r in rs])  # [n_seeds, n_ctx]
+        mean_acc = accs.mean(axis=0)
+        decay_by_i[i] = ((np.arange(len(mean_acc)) - i).tolist(), mean_acc.tolist())
+
+    summary = {
+        "config": {"i_values": list(i_values), "seeds": list(seeds), "tail": tail,
+                   "n_steps": n_steps, "n_fit": n_fit, "n_test": n_test},
+        "by_horizon": by_i,
+        "onset_tracks_horizon": {str(i): by_i[i]["onset_mean"] for i in by_i},
+        "records": records,
+    }
+    if save and by_i:
+        viz.plot_retention_vs_horizon(
+            by_i, save_path=results_dir / "mixture_retention_vs_horizon.png")
+        viz.plot_retention_decay(
+            {i: (np.array(decay_by_i[i][0]), np.array(decay_by_i[i][1])) for i in decay_by_i},
+            save_path=results_dir / "mixture_retention_decay.png")
+        summary["figures"] = {
+            "retention_vs_horizon": _rel(results_dir / "mixture_retention_vs_horizon.png"),
+            "retention_decay": _rel(results_dir / "mixture_retention_decay.png"),
+        }
+        _write_metrics(summary, results_dir / "mixture_sweep_summary.json")
+    return summary
+
+
+def direction_transfer_analysis(
+    horizon: int = 2, tail: int = 2, n_ctx: int = 8, seed: int = 0,
+    n_fit: int = 6000, n_test: int = 6000, device=None,
+    checkpoint_path=None, results_dir: Path = RESULTS_DIR, save: bool = True,
+):
+    """Is the spent coin carried in the *same* residual direction across positions?
+
+    Fit a plain logistic probe per position (each position's coin-direction), then
+    transfer the reveal-position probe to every position. High transfer accuracy and
+    high cosine similarity in epoch >= 2 mean one persistent representation is carried
+    forward, rather than the coin being re-encoded position by position.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = horizon + tail
+
+    ckpt = Path(checkpoint_path) if checkpoint_path else (
+        REPO_ROOT / "checkpoints" / f"mixture_h{horizon}_t{tail}.pt")
+    if ckpt.exists():
+        model, _ = load_checkpoint(ckpt, device)
+    else:
+        arch = ArchConfig.paper(process, n_ctx=n_ctx, seed=seed)
+        cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=8000, seed=seed)
+        model = train(process, arch, cfg, verbose=False,
+                      init_states_fn=process.aligned_init_states).model
+
+    fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+    test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+    Xf, Xt = _residuals_3d(model, fit.tokens), _residuals_3d(model, test.tokens)
+    yf, yt = fit.z_first, test.z_first
+    L = Xf.shape[1]
+
+    clfs, perpos_acc, dirs = [], np.empty(L), np.empty((L, Xf.shape[2]))
+    for p in range(L):
+        clf = LogisticRegression(max_iter=5000).fit(Xf[:, p, :], yf)
+        clfs.append(clf)
+        perpos_acc[p] = accuracy_score(yt, clf.predict(Xt[:, p, :]))
+        dirs[p] = clf.coef_.ravel()
+    reveal = horizon
+    transfer_acc = np.array([accuracy_score(yt, clfs[reveal].predict(Xt[:, p, :]))
+                             for p in range(L)])
+    dn = dirs / (np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12)
+    cos_to_reveal = (dn @ dn[reveal]).tolist()
+    ret = slice(epoch_len, L)
+
+    metrics = {
+        "process": f"mixture(h={horizon},tail={tail})", "n_ctx": n_ctx,
+        "reveal_position": reveal,
+        "perpos_accuracy": [round(float(a), 4) for a in perpos_acc],
+        "transfer_accuracy": [round(float(a), 4) for a in transfer_acc],
+        "cosine_to_reveal_direction": [round(float(c), 4) for c in cos_to_reveal],
+        "mean_transfer_acc_retention": float(np.mean(transfer_acc[ret])),
+        "mean_cosine_retention": float(np.mean(np.array(cos_to_reveal)[ret])),
+        "interpretation": (
+            "Reveal-position probe transferred to epoch>=2 positions: high accuracy and "
+            "high cosine similarity mean the coin is carried in the same residual direction "
+            "(one persistent representation), not re-encoded per position."
+        ),
+    }
+    fig = viz.plot_direction_transfer(
+        np.arange(L), perpos_acc, transfer_acc, horizon, epoch_len,
+        save_path=(results_dir / "mixture_direction_transfer.png") if save else None)
+    if save:
+        metrics["figure"] = _rel(results_dir / "mixture_direction_transfer.png")
+        _write_metrics(metrics, results_dir / "metrics_mixture_direction.json")
+    return {"metrics": metrics, "figure": fig}
+
+
+def coin_position_geometry(horizon=2, tail=2, n_ctx=8, seed=0, n_fit=6000, n_test=6000,
+                           device=None, checkpoint_path=None, results_dir: Path = RESULTS_DIR,
+                           save: bool = True):
+    """Full position x position transfer + cosine for the coin direction.
+
+    Resolves the open question from the reveal-only check: do epoch >= 2 positions
+    share ONE retained direction (bright off-diagonal block) or re-encode the coin
+    per position (dark off-diagonal)?
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = horizon + tail
+    ckpt = Path(checkpoint_path) if checkpoint_path else (
+        REPO_ROOT / "checkpoints" / f"mixture_h{horizon}_t{tail}.pt")
+    model, _ = load_checkpoint(ckpt, device)
+
+    fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+    test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+    Xf, Xt = _residuals_3d(model, fit.tokens), _residuals_3d(model, test.tokens)
+    yf, yt = fit.z_first, test.z_first
+    L = Xf.shape[1]
+
+    clfs, dirs = [], np.empty((L, Xf.shape[2]))
+    for p in range(L):
+        clf = LogisticRegression(max_iter=5000).fit(Xf[:, p, :], yf)
+        clfs.append(clf)
+        dirs[p] = clf.coef_.ravel()
+    transfer = np.array([[accuracy_score(yt, clfs[p].predict(Xt[:, q, :])) for q in range(L)]
+                         for p in range(L)])
+    dn = dirs / (np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12)
+    cosine = dn @ dn.T
+
+    ret = list(range(epoch_len, L))
+    off = lambda M: (float(np.mean([M[p, q] for p in ret for q in ret if p != q]))
+                     if len(ret) > 1 else float("nan"))
+    metrics = {
+        "process": f"mixture(h={horizon},tail={tail})", "n_ctx": n_ctx, "epoch_len": epoch_len,
+        "transfer_matrix": transfer.round(4).tolist(),
+        "cosine_matrix": cosine.round(4).tolist(),
+        "mean_within_retention_transfer_offdiag": off(transfer),
+        "mean_within_retention_cosine_offdiag": off(cosine),
+        "interpretation": ("High within-retention off-diagonal transfer/cosine => epoch>=2 "
+                           "positions share one retained direction; low => coin is re-encoded "
+                           "per position."),
+    }
+    fig = viz.plot_transfer_cosine_matrices(
+        transfer, cosine, epoch_len,
+        save_path=(results_dir / "mixture_position_geometry.png") if save else None,
+        title=f"Coin direction across positions (mixture h={horizon})")
+    if save:
+        metrics["figure"] = _rel(results_dir / "mixture_position_geometry.png")
+        _write_metrics(metrics, results_dir / "metrics_mixture_position_geometry.json")
+    return {"metrics": metrics, "figure": fig}
+
+
+def coin_depth_geometry(horizon=2, tail=2, n_ctx=8, seed=0, position=None,
+                        n_fit=6000, n_test=6000, device=None, checkpoint_path=None,
+                        results_dir: Path = RESULTS_DIR, save: bool = True):
+    """Per-layer (resid_post) decode + cross-layer cosine at a fixed retention position.
+
+    Depth analogue of the refusal finding: is the coin in a consistent direction across
+    layers (high off-diagonal cosine) or depth-specific? Note resid_post is cumulative,
+    so decodability is expected to be ~monotone in depth; the cosine is the informative part.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = horizon + tail
+    position = epoch_len if position is None else position  # first retention position
+    ckpt = Path(checkpoint_path) if checkpoint_path else (
+        REPO_ROOT / "checkpoints" / f"mixture_h{horizon}_t{tail}.pt")
+    model, _ = load_checkpoint(ckpt, device)
+    nL = model.cfg.n_layers
+
+    fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+    test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+    cf = cache_residuals(model, fit.tokens, "resid_post")
+    ct = cache_residuals(model, test.tokens, "resid_post")
+    Nf, Nt = fit.tokens.shape[0], test.tokens.shape[0]
+    yf, yt = fit.z_first, test.z_first
+
+    dirs, acc = [], []
+    for l in range(nL):
+        Xf = cf[l].reshape(Nf, n_ctx, -1)[:, position, :]
+        Xt = ct[l].reshape(Nt, n_ctx, -1)[:, position, :]
+        clf = LogisticRegression(max_iter=5000).fit(Xf, yf)
+        dirs.append(clf.coef_.ravel())
+        acc.append(accuracy_score(yt, clf.predict(Xt)))
+    dirs = np.array(dirs)
+    dn = dirs / (np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12)
+    cos = dn @ dn.T
+
+    metrics = {
+        "process": f"mixture(h={horizon},tail={tail})", "position": position, "n_layers": nL,
+        "layer_accuracy": [round(float(a), 4) for a in acc],
+        "layer_cosine_matrix": cos.round(4).tolist(),
+        "mean_offdiag_cosine": float(np.mean([cos[i, j] for i in range(nL)
+                                              for j in range(nL) if i != j])),
+        "interpretation": ("Per-layer decode of the coin at a retention position and cross-layer "
+                           "cosine. High off-diagonal cosine => consistent direction across depth "
+                           "(refusal-like). resid_post is cumulative, so accuracy is ~monotone in depth."),
+    }
+    fig = viz.plot_depth_consistency(
+        list(range(nL)), acc, cos, position,
+        save_path=(results_dir / "mixture_depth_geometry.png") if save else None,
+        title=f"Coin across depth at position {position} (mixture h={horizon})")
+    if save:
+        metrics["figure"] = _rel(results_dir / "mixture_depth_geometry.png")
+        _write_metrics(metrics, results_dir / "metrics_mixture_depth_geometry.json")
+    return {"metrics": metrics, "figure": fig}
+
+
+def causal_ablation(horizon=2, tail=2, n_ctx=8, seed=0, n_fit=6000, n_test=6000,
+                    device=None, checkpoint_path=None, results_dir: Path = RESULTS_DIR,
+                    save: bool = True):
+    """Is the *retained* coin causally used, or inert?
+
+    Directional ablation: at chosen positions, project the coin's diff-in-means
+    direction out of every layer's resid_post, then measure per-position next-token
+    loss. Three conditions:
+      * clean,
+      * **ablate retained** (epoch >= 2 positions) — expect loss ~ unchanged if inert,
+      * **ablate used** (the epoch-1 reveal position, which must carry the coin to
+        predict the next indicator) — positive control; expect a loss spike.
+    A decodability-drop check confirms the ablation actually removed the coin.
+    """
+    import torch.nn.functional as F
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = horizon + tail
+    ckpt = Path(checkpoint_path) if checkpoint_path else (
+        REPO_ROOT / "checkpoints" / f"mixture_h{horizon}_t{tail}.pt")
+    model, _ = load_checkpoint(ckpt, device)
+    nL, d_model, L = model.cfg.n_layers, model.cfg.d_model, n_ctx
+
+    fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+    test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+
+    # diff-in-means coin direction per (layer, position) from the fit set
+    cf = cache_residuals(model, fit.tokens, "resid_post")
+    yf, Nf = fit.z_first, fit.tokens.shape[0]
+    dirs = {}
+    for l in range(nL):
+        R = cf[l].reshape(Nf, L, d_model)
+        for p in range(L):
+            v = R[yf == 1, p].mean(0) - R[yf == 0, p].mean(0)
+            n = np.linalg.norm(v)
+            dirs[(l, p)] = torch.tensor(v / n if n > 0 else v, dtype=torch.float32, device=device)
+
+    def hooks_for(positions):
+        def mk(l):
+            vs = {p: dirs[(l, p)] for p in positions}
+            def hook(act, hook):
+                for p, v in vs.items():
+                    act[:, p, :] = act[:, p, :] - (act[:, p, :] @ v).unsqueeze(-1) * v
+                return act
+            return hook
+        return [(f"blocks.{l}.hook_resid_post", mk(l)) for l in range(nL)]
+
+    def per_pos_loss(hooks):
+        with torch.no_grad():
+            logits = model.run_with_hooks(test.tokens, fwd_hooks=hooks, return_type="logits")
+            logp = F.log_softmax(logits[:, :-1, :], dim=-1)
+            tgt = test.tokens[:, 1:]
+            nll = -logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+            return nll.mean(0).cpu().numpy()
+
+    retain = list(range(epoch_len, L))
+    use_pos = horizon  # epoch-1 reveal: must carry the coin to predict token horizon+1
+    clean = per_pos_loss([])
+    ablate_retained = per_pos_loss(hooks_for(retain))
+    ablate_used = per_pos_loss(hooks_for([use_pos]))
+
+    # sanity: did the retained-ablation actually remove the coin? decode z_first at the
+    # first retention position from the (ablated) final-layer resid.
+    captured = {}
+    def capture(act, hook):
+        captured["r"] = act.detach().cpu().numpy()
+        return act
+    with torch.no_grad():
+        model.run_with_hooks(
+            test.tokens,
+            fwd_hooks=hooks_for(retain) + [(f"blocks.{nL-1}.hook_resid_post", capture)],
+            return_type=None)
+    abl_final = captured["r"].reshape(test.tokens.shape[0], L, d_model)
+    clean_final_fit = cf[nL-1].reshape(Nf, L, d_model)
+    clean_final_test = cache_residuals(model, test.tokens, "resid_post")[nL-1].reshape(
+        test.tokens.shape[0], L, d_model)
+    pos0 = retain[0]
+    probe = LogisticRegression(max_iter=5000).fit(clean_final_fit[:, pos0, :], yf)
+    acc_clean = accuracy_score(test.z_first, probe.predict(clean_final_test[:, pos0, :]))
+    acc_ablated = accuracy_score(test.z_first, probe.predict(abl_final[:, pos0, :]))
+
+    pred_pos = list(range(L - 1))
+    metrics = {
+        "process": f"mixture(h={horizon},tail={tail})", "n_ctx": n_ctx,
+        "use_position": use_pos, "retention_positions": retain,
+        "clean_loss_by_position": [round(float(x), 4) for x in clean],
+        "ablate_retained_loss_by_position": [round(float(x), 4) for x in ablate_retained],
+        "ablate_used_loss_by_position": [round(float(x), 4) for x in ablate_used],
+        "total_loss_clean": round(float(clean.mean()), 4),
+        "total_loss_ablate_retained": round(float(ablate_retained.mean()), 4),
+        "total_loss_ablate_used": round(float(ablate_used.mean()), 4),
+        "delta_at_use_position": round(float(ablate_used[use_pos] - clean[use_pos]), 4),
+        "max_abs_delta_retention": round(float(np.max(np.abs(
+            ablate_retained[retain[0]:] - clean[retain[0]:]))), 4),
+        "z_first_decode_at_retention_clean": round(float(acc_clean), 4),
+        "z_first_decode_at_retention_ablated": round(float(acc_ablated), 4),
+        "interpretation": ("Ablating the retained coin (epoch>=2) leaves next-token loss "
+                           "unchanged while it is fully removed (decodability -> chance), yet "
+                           "ablating the same coin where it is USED (the reveal) spikes the loss. "
+                           "=> the retained copy is decodable but causally inert: the model is an "
+                           "optimal predictor carrying genuinely non-minimal information."),
+    }
+    fig = viz.plot_ablation_loss(
+        pred_pos, clean, ablate_used, ablate_retained, use_pos, epoch_len,
+        save_path=(results_dir / "mixture_ablation.png") if save else None,
+        title=f"Causal ablation of the coin (mixture h={horizon})")
+    if save:
+        metrics["figure"] = _rel(results_dir / "mixture_ablation.png")
+        _write_metrics(metrics, results_dir / "metrics_mixture_ablation.json")
+    return {"metrics": metrics, "figure": fig}
+
+
+def capacity_pressure_sweep(
+    widths=(2, 3, 4, 6, 8, 16, 64),
+    seeds=(0, 1, 2),
+    horizon: int = 2,
+    tail: int = 2,
+    n_ctx: int = 8,
+    n_steps: int = 10_000,
+    n_fit: int = 4000,
+    n_test: int = 4000,
+    converged_tol: float = 0.02,
+    device=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Does minimality emerge when residual bandwidth is scarce?
+
+    With d_model=64 the model retains the spent coin — unsurprising: the stream has
+    ~60 spare dimensions and the loss has no forgetting term. This sweep shrinks
+    ONLY the residual stream (d_model, with d_head=min(8, d_model); the MLP stays
+    at width 256 so compute stays generous and the squeeze is specifically on
+    representational bandwidth) and asks where, if anywhere, the per-position state
+    converges to the minimal belief and drops the spent coin.
+
+    The essential control is the loss gap: a retention drop only counts as
+    *emergent minimality* at widths where the model still reaches the optimal
+    floor. (Failing to learn the task at all would also kill retention, for the
+    boring reason.) Each (width, seed) record is written incrementally.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = horizon + tail
+    floor = _mixture_floor_nats(process, n_ctx, seed=999)
+    records = []
+    json_path = results_dir / "mixture_capacity_sweep.json"
+
+    for w in widths:
+        for seed in seeds:
+            try:
+                arch = ArchConfig.paper(process, n_ctx=n_ctx, seed=seed,
+                                        d_model=w, d_head=min(8, w))
+                cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=n_steps, seed=seed)
+                result = train(process, arch, cfg, verbose=False,
+                               init_states_fn=process.aligned_init_states,
+                               process_name=f"mix-cap(w={w},s={seed})")
+                model = result.model
+                loss = _eval_aligned_loss(model, process, n_ctx, device)
+                fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+                test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+                _, acc = probe_label_by_position(model, fit.tokens, fit.z_first,
+                                                 test.tokens, test.z_first)
+                # Needed-info control: the *current* (second-epoch) coin at the last
+                # position, which any converged model must carry.
+                Xf = _residuals_3d(model, fit.tokens)[:, -1, :]
+                Xt = _residuals_3d(model, test.tokens)[:, -1, :]
+                cur = LogisticRegression(max_iter=2000).fit(Xf, fit.z_labels[:, -1])
+                cur_acc = accuracy_score(test.z_labels[:, -1], cur.predict(Xt))
+
+                prefix, revealed, retention = acc[:horizon], acc[horizon:epoch_len], acc[epoch_len:]
+                rec = {
+                    "d_model": w, "seed": seed, "d_head": min(8, w),
+                    "n_params": int(sum(p.numel() for p in model.parameters())),
+                    "loss_nats": round(loss, 4), "floor_nats": round(floor, 4),
+                    "gap_nats": round(loss - floor, 4),
+                    "converged": bool(loss - floor < converged_tol),
+                    "mean_prefix_acc": float(prefix.mean()),
+                    "mean_revealed_acc": float(revealed.mean()),
+                    "mean_retention_acc": float(retention.mean()),
+                    "current_coin_acc_last": float(cur_acc),
+                    "accuracy_by_position": [round(float(a), 4) for a in acc],
+                }
+                records.append(rec)
+                print(f"[cap] w={w:>2} seed={seed} gap={loss-floor:+.4f} "
+                      f"conv={rec['converged']} retention={rec['mean_retention_acc']:.3f} "
+                      f"current={cur_acc:.3f}", flush=True)
+                del model, result, fit, test
+            except Exception as e:
+                records.append({"d_model": w, "seed": seed, "error": repr(e)})
+                print(f"[cap] w={w} seed={seed} FAILED: {e!r}", flush=True)
+            if save:
+                _write_metrics({"floor_nats": floor, "records": records}, json_path)
+
+    ok = [r for r in records if "error" not in r]
+    by_w = {}
+    for w in widths:
+        rs_all = [r for r in ok if r["d_model"] == w]
+        if not rs_all:
+            continue
+        conv = [r for r in rs_all if r["converged"]]
+        rs = conv or rs_all  # stats from converged runs when any exist
+        ret = np.array([r["mean_retention_acc"] for r in rs])
+        gaps = np.array([r["gap_nats"] for r in rs_all])
+        by_w[w] = {
+            "retention_mean": float(ret.mean()), "retention_std": float(ret.std()),
+            "revealed": float(np.mean([r["mean_revealed_acc"] for r in rs])),
+            "prefix": float(np.mean([r["mean_prefix_acc"] for r in rs])),
+            "current_coin": float(np.mean([r["current_coin_acc_last"] for r in rs])),
+            "gap_mean": float(gaps.mean()), "gap_std": float(gaps.std()),
+            "n_converged": len(conv), "n_runs": len(rs_all),
+        }
+
+    summary = {
+        "config": {"widths": list(widths), "seeds": list(seeds), "horizon": horizon,
+                   "tail": tail, "n_ctx": n_ctx, "n_steps": n_steps,
+                   "converged_tol": converged_tol, "d_mlp": "256 (fixed, deliberately)"},
+        "floor_nats": floor,
+        "by_width": {str(w): by_w[w] for w in by_w},
+        "records": records,
+    }
+    if save and by_w:
+        viz.plot_capacity_pressure(
+            by_w, converged_tol, len(seeds),
+            save_path=results_dir / "mixture_capacity_pressure.png")
+        summary["figure"] = _rel(results_dir / "mixture_capacity_pressure.png")
+        _write_metrics(summary, results_dir / "mixture_capacity_summary.json")
+    return summary
