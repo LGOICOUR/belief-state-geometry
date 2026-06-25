@@ -4,6 +4,8 @@
 extended with a mixture-process experiment on what the residual stream keeps and discards.
 Code, tests, and figures: [github.com/LGOICOUR/belief-state-geometry](https://github.com/LGOICOUR/belief-state-geometry).*
 
+> *AI summary — a Claude-drafted overview of this project. For the author's own writeup, as published to LessWrong, see [`lesswrong-writeup.md`](lesswrong-writeup.md).*
+
 ## Summary
 
 - I replicate the belief-state-geometry result: a small transformer trained *only* on
