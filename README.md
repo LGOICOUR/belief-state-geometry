@@ -22,6 +22,8 @@ Right: the belief decoded by a single linear map from the 64-dimensional residua
 stream of a transformer that never saw anything but next-token labels. Both are
 coloured by the true belief (RGB = belief coordinates over the 3 hidden states).*
 
+**Writeup.** A narrative walkthrough of this project, published on [LessWrong](https://www.lesswrong.com/posts/vzav5kfbRCDQyEB8v/toy-transformers-may-represent-belief-state-geometry) and mirrored at [`docs/lesswrong-writeup.md`](docs/lesswrong-writeup.md). (An AI-drafted summary of the same work: [`docs/ai-summary.md`](docs/ai-summary.md).)
+
 ---
 
 ## Why this is a strong result (and easy to get subtly wrong)
@@ -153,6 +155,7 @@ belief-state-geometry/
   notebooks/         # 01_mess3_replication.ipynb, 02_rrxor_layers.ipynb
   tests/             # pytest: HMM matrices, stationary dist, belief update, MSP, entropy rate
   results/           # saved figures + metrics_*.json
+  docs/              # phase2.md (Phase-2 method); lesswrong-writeup.md (writeup); ai-summary.md
 ```
 
 ## Secondary results (RRXOR)
