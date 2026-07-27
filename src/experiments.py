@@ -1260,3 +1260,115 @@ def run_norm_confidence(
         _write_metrics({k: v["metrics"] for k, v in out.items()},
                        results_dir / "metrics_norm_confidence.json")
     return out
+
+
+# ====================================================================== #
+# Phase 3: the memory bottleneck (recurrent carried state)
+# ====================================================================== #
+def rnn_bottleneck_sweep(
+    widths=(2, 3, 4, 6, 8, 16, 32, 64),
+    seeds=(0, 1, 2),
+    horizon: int = 2,
+    tail: int = 2,
+    n_ctx: int = 8,
+    n_steps: int = 6000,
+    n_fit: int = 4000,
+    n_test: int = 4000,
+    converged_tol: float = 0.02,
+    cell: str = "gru",
+    device=None,
+    results_dir: Path = RESULTS_DIR,
+    save: bool = True,
+):
+    """Does minimality emerge when the state must be *carried* rather than re-read?
+
+    The Phase-2 transformer keeps the spent coin at every converged residual width --
+    but its indicator tokens stay in the context window, so attention can simply
+    re-read them; nothing survives a memory bottleneck. A recurrent model has no
+    attention: everything it knows at position ``t`` is in the carried state ``h_t``,
+    so retaining the defunct coin *costs hidden dimensions*.
+
+    Same design as ``capacity_pressure_sweep`` (the transformer arm) so the two are
+    directly comparable: shrink only the carried state, and read retention against
+    two controls --
+
+    * **convergence** (gap to the epoch-aligned floor): a retention drop only counts
+      as emergent minimality where the model still learns the task;
+    * **live coin** (the *current* epoch's coin at the last position): information the
+      model provably needs. If this also collapses, low retention means "the small
+      model is bad at everything", not "it selectively discarded the defunct coin".
+
+    Each (width, seed) record is written incrementally.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    from rnn import RNNConfig, probe_hidden_by_position, train_rnn
+
+    device = get_device(device)
+    process = MixtureProcess(horizon, tail)
+    epoch_len = horizon + tail
+    floor = _mixture_floor_nats(process, n_ctx, seed=999)
+    records = []
+    json_path = results_dir / "rnn_bottleneck_sweep.json"
+
+    for w in widths:
+        for seed in seeds:
+            cfg = TrainConfig.fast(seq_len=n_ctx, n_steps=n_steps, seed=seed,
+                                   log_every=10**9, eval_every=0)
+            res = train_rnn(process, RNNConfig(d_vocab=process.n_symbols, d_hidden=w, seed=seed),
+                            cfg, init_states_fn=process.aligned_init_states, verbose=False,
+                            process_name=f"rnn-bneck(d={w},s={seed})")
+            model = res.model
+            loss = _eval_aligned_loss(model, process, n_ctx, device)
+            fit = make_mixture_eval_set(process, n_fit, n_ctx, seed + 1, device)
+            test = make_mixture_eval_set(process, n_test, n_ctx, seed + 2, device)
+            _, acc = probe_hidden_by_position(model, fit.tokens, fit.z_first,
+                                              test.tokens, test.z_first)
+            # Live-coin control: the current epoch's coin at the last position.
+            Hf = model.hidden_states(fit.tokens)[:, -1, :]
+            Ht = model.hidden_states(test.tokens)[:, -1, :]
+            cur = LogisticRegression(max_iter=2000).fit(Hf, fit.z_labels[:, -1])
+            cur_acc = accuracy_score(test.z_labels[:, -1], cur.predict(Ht))
+
+            prefix, revealed, retention = acc[:horizon], acc[horizon:epoch_len], acc[epoch_len:]
+            rec = {
+                "d_hidden": w, "seed": seed, "cell": cell,
+                "n_params": int(sum(p.numel() for p in model.parameters())),
+                "loss_nats": round(loss, 4), "floor_nats": round(floor, 4),
+                "gap_nats": round(loss - floor, 4),
+                "converged": bool(loss - floor < converged_tol),
+                "mean_prefix_acc": float(prefix.mean()),
+                "mean_revealed_acc": float(revealed.mean()),
+                "mean_retention_acc": float(retention.mean()),
+                "current_coin_acc_last": float(cur_acc),
+                "accuracy_by_position": [round(float(a), 4) for a in acc],
+            }
+            records.append(rec)
+            print(f"[bneck] d={w:>2} seed={seed} gap={loss-floor:+.4f} "
+                  f"conv={rec['converged']} retention={rec['mean_retention_acc']:.3f} "
+                  f"live={cur_acc:.3f}", flush=True)
+            if save:
+                json_path.write_text(json.dumps(records, indent=2))
+
+    by_w = {}
+    for w in widths:
+        rs = [r for r in records if r["d_hidden"] == w]
+        if not rs:
+            continue
+        ret = np.array([r["mean_retention_acc"] for r in rs])
+        by_w[w] = {
+            "retention_mean": float(ret.mean()), "retention_std": float(ret.std()),
+            "revealed": float(np.mean([r["mean_revealed_acc"] for r in rs])),
+            "prefix": float(np.mean([r["mean_prefix_acc"] for r in rs])),
+            "live_coin": float(np.mean([r["current_coin_acc_last"] for r in rs])),
+            "gap_mean": float(np.mean([r["gap_nats"] for r in rs])),
+            "gap_std": float(np.std([r["gap_nats"] for r in rs])),
+            "n_converged": int(sum(r["converged"] for r in rs)), "n_runs": len(rs),
+        }
+    summary = {"config": {"widths": list(widths), "seeds": list(seeds), "cell": cell,
+                          "n_steps": n_steps, "converged_tol": converged_tol},
+               "floor_nats": floor, "by_width": by_w, "records": records}
+    if save:
+        (results_dir / "rnn_bottleneck_summary.json").write_text(json.dumps(summary, indent=2))
+    return summary

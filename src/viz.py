@@ -585,3 +585,61 @@ def _save(fig, save_path, dark=False):
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fc = fig.get_facecolor() if dark else "white"
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=fc)
+
+
+def plot_bottleneck_contrast(gru_by_w, tf_by_w, tol, n_seeds, save_path=None, title=None):
+    """Phase 3 headline: retention of the *defunct* coin vs state width, for a
+    transformer (which can re-read the spent coin from its context window) and a
+    recurrent model (which must **carry** it in a fixed-size state).
+
+    Top — retention for both architectures, with the live-coin control (information
+    the model provably needs, so a collapse there would mean "small model is broken"
+    rather than "selectively discarded") and the chance line. Bottom — gap to the
+    optimal loss floor. Open markers mark widths where not every seed converged: a
+    retention drop is only *minimality* where the task was still learned."""
+    gws, tws = sorted(gru_by_w), sorted(tf_by_w)
+    g_m = [gru_by_w[w]["retention_mean"] for w in gws]
+    g_s = [gru_by_w[w]["retention_std"] for w in gws]
+    g_live = [gru_by_w[w]["live_coin"] for w in gws]
+    g_full = [gru_by_w[w]["n_converged"] == n_seeds for w in gws]
+    t_m = [tf_by_w[w]["retention_mean"] for w in tws]
+    t_s = [tf_by_w[w]["retention_std"] for w in tws]
+    t_full = [tf_by_w[w]["n_converged"] == tf_by_w[w]["n_runs"] for w in tws]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.5, 7.4), sharex=True,
+                                   gridspec_kw={"height_ratios": [3, 1.6]})
+    ax1.axhline(0.5, color="0.6", ls=":", lw=1, label="chance")
+    ax1.plot(gws, g_live, marker="s", color="0.45", ls="--", lw=1.2,
+             label="live coin (control — still needed)")
+    ax1.errorbar(tws, t_m, yerr=t_s, color="C0", lw=2, capsize=3, zorder=3,
+                 label="transformer (can re-read context)")
+    ax1.errorbar(gws, g_m, yerr=g_s, color="C3", lw=2, capsize=3, zorder=3,
+                 label="recurrent (must carry state)")
+    for w, m, f in zip(tws, t_m, t_full):
+        ax1.plot([w], [m], marker="o", ms=7, mfc=("C0" if f else "white"), mec="C0", zorder=4)
+    for w, m, f in zip(gws, g_m, g_full):
+        ax1.plot([w], [m], marker="o", ms=7, mfc=("C3" if f else "white"), mec="C3", zorder=4)
+    ax1.set_ylabel("decode the defunct coin (accuracy)")
+    ax1.set_ylim(0.4, 1.05)
+    ax1.legend(fontsize=8.5, loc="lower right")
+    ax1.grid(alpha=0.2)
+    ax1.set_title(title or "Does a memory bottleneck force minimality?")
+
+    ax2.axhline(tol, color="k", ls="--", lw=1, label=f"convergence tol ({tol} nats)")
+    ax2.errorbar(tws, [tf_by_w[w]["gap_mean"] for w in tws],
+                 yerr=[tf_by_w[w]["gap_std"] for w in tws],
+                 marker="o", color="C0", lw=1.6, capsize=3, label="transformer")
+    ax2.errorbar(gws, [gru_by_w[w]["gap_mean"] for w in gws],
+                 yerr=[gru_by_w[w]["gap_std"] for w in gws],
+                 marker="o", color="C3", lw=1.6, capsize=3, label="recurrent")
+    ax2.set_xscale("log", base=2)
+    ax2.set_xticks(sorted(set(gws) | set(tws)))
+    ax2.set_xticklabels([str(w) for w in sorted(set(gws) | set(tws))])
+    ax2.set_xlabel("state width  (d_model / d_hidden)")
+    ax2.set_ylabel("loss gap (nats)")
+    ax2.legend(fontsize=8.5)
+    ax2.grid(alpha=0.2)
+    fig.tight_layout()
+    if save_path:
+        _save(fig, save_path)
+    return fig

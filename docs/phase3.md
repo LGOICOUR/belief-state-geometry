@@ -47,6 +47,50 @@ optimal predictor should converge toward it.
 4. **Ablation carried over** — when the GRU *does* retain, is the retained coin still
    causally inert?
 
+## Results (P0–P2 complete)
+
+**P0 — the GRU is an optimal predictor.** At `d_hidden = 64` it reaches **0.4958 nats**
+against the epoch-aligned floor of **0.4951** (gap +0.0007) — the same floor the
+transformer hits. So any representational difference below is a real difference, not a
+competence gap.
+
+**P1 — super-sufficiency is not merely a re-reading artifact.** At full width the GRU
+carries the defunct coin at **1.0** through the whole next epoch
+(`[0.50, 0.49, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]`): chance in the prefix, commits at the
+reveal, then holds. A model that *must pay* to keep the coin still keeps it when it has
+room to spare.
+
+**P2 — but a bottleneck does force minimality.** Sweeping the carried-state width
+(3 seeds each), retention of the defunct coin falls monotonically as the state tightens,
+while the transformer stays pinned near 1.0 at every converged width:
+
+| width | recurrent (carried) | transformer (can re-read) |
+|---|---|---|
+| 4  | **0.803** ± 0.069 | 0.974 |
+| 6  | **0.856** ± 0.042 | 1.000 |
+| 8  | **0.877** ± 0.089 | 1.000 |
+| 16 | **0.895** ± 0.077 | 1.000 |
+| 32 | 0.981 ± 0.020 | — |
+| 64 | 1.000 ± 0.000 | 1.000 |
+
+![Memory bottleneck contrast](../results/rnn_bottleneck_contrast.png)
+
+Two controls make this readable as *selective forgetting*:
+
+* **Convergence** — every width ≥ 4 reaches the floor (gap ≤ 0.005), so the drop is not
+  "the small model failed to learn the task". `d_hidden ∈ {2, 3}` do *not* converge and
+  are excluded (open markers).
+* **Live coin** — the *current* epoch's coin, which the model provably needs, stays
+  decodable at **1.00 at every width**. The model is not degraded across the board; it
+  discards specifically the information it no longer needs.
+
+**Reading.** Phase 2's retention was, in part, an artifact of in-context reachability:
+give the model a free copy in the context window and it never lets go, at any width.
+Force the state to be *carried* and the same latent gets compressed away under pressure —
+minimality via **inaccessibility**, not merely load. Super-sufficiency is therefore
+architecture-dependent, and the rate–distortion reading of Phase 2 survives in the
+substrate where it has real teeth.
+
 ## Method notes
 
 - Same processes, same probe methodology as Phase 1/2 — the only change is the substrate

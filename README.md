@@ -148,6 +148,7 @@ belief-state-geometry/
     beliefs.py       # analytic belief states, MSP enumeration/sampling, entropy rate, simplex projection
     data.py          # sequence sampling, batching, held-out eval sets, seeding/device
     model.py         # HookedTransformer config matching the paper
+    rnn.py           # Phase 3: recurrent (GRU/LSTM) model with a bottlenecked carried state
     train.py         # training loop, loss-vs-entropy-rate logging, checkpointing (CLI)
     probe.py         # linear regression resid -> belief, R², simplex projection
     viz.py           # fractal + activation-cloud plots; per-layer panels
@@ -155,7 +156,7 @@ belief-state-geometry/
   notebooks/         # 01_mess3_replication.ipynb, 02_rrxor_layers.ipynb
   tests/             # pytest: HMM matrices, stationary dist, belief update, MSP, entropy rate
   results/           # saved figures + metrics_*.json
-  docs/              # phase2.md (Phase-2 method); lesswrong-writeup.md (writeup); ai-summary.md
+  docs/              # phase2.md, phase3.md (methods); lesswrong-writeup.md (writeup); ai-summary.md
 ```
 
 ## Secondary results (RRXOR)
@@ -204,6 +205,31 @@ The mixture is just another `Process` and "which generator" is just another prob
 target, so this reuses the Phase-1 abstractions unchanged. Full method, geometry, and
 caveats: [`docs/phase2.md`](docs/phase2.md). Reproduce via the
 `experiments.run_mixture_*` / `causal_ablation` / `capacity_pressure_sweep` functions.
+
+## Phase 3 — the memory bottleneck: is retention just in-context reachability?
+
+Phase 2 has one confound: the spent coin's tokens stay in the context window, so
+attention can simply **re-read** them — nothing survives a memory bottleneck. Phase 3
+swaps the transformer for a **GRU** (`src/rnn.py`), which has no attention: everything it
+knows at position `t` sits in a fixed-size carried state `h_t`, so keeping the defunct
+coin *costs hidden dimensions*.
+
+- **The GRU is still an optimal predictor** — 0.4958 nats vs the 0.4951 epoch-aligned
+  floor, so representational differences aren't competence gaps.
+- **Retention is not merely a re-reading artifact** — at full width the GRU carries the
+  defunct coin at **1.0** through the following epoch, exactly like the transformer.
+- **But a bottleneck does induce minimality.** Shrinking the carried state (3 seeds/width)
+  drops retention monotonically — **0.803** at `d_hidden=4` vs the transformer's ~1.0 at
+  *every* converged width ([`rnn_bottleneck_contrast.png`](results/rnn_bottleneck_contrast.png)).
+  Two controls make this selective forgetting rather than a broken model: every width ≥ 4
+  still reaches the loss floor, and the **live coin** — information the model provably
+  needs — stays decodable at **1.00 at every width**.
+
+So Phase 2's super-sufficiency is partly an artifact of in-context reachability: given a
+free copy in context the model never lets go, but forced to *carry* the latent it
+compresses it away under pressure — minimality via **inaccessibility**, not only load.
+Method and caveats: [`docs/phase3.md`](docs/phase3.md). Reproduce via
+`experiments.rnn_bottleneck_sweep`.
 
 ## Side experiment — the norm is not a confidence channel
 
