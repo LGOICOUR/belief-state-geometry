@@ -14,7 +14,7 @@ general. Phase 3 removes the crutch.
 
 ## The bottleneck
 
-Swap the transformer for a **recurrent model** (a GRU first; a state-space model in 3b). A
+Swap the transformer for a **recurrent model** (a GRU here; a state-space model in Phase 4). A
 recurrent model has no attention: at position `t` it sees only the current token plus a
 **fixed-size carried state** `h_t ∈ ℝ^{d_hidden}`. Anything from the past it wants at
 position `t` must have been actively stored in `h_t`. Retaining the defunct coin now
@@ -38,16 +38,19 @@ optimal predictor should converge toward it.
 
 ## What we measure
 
-1. **Belief geometry in a carried state** — probe `h_t` for the belief / generator marginal.
-   Extends the Phase-1 result to a recurrent architecture (belief geometry isn't
-   transformer-specific).
-2. **The bottleneck curve** — retention(defunct coin) vs. `d_hidden` on the mixture (headline).
-3. **The contrast** — transformer (re-read, retains at all widths) vs. recurrent (carried,
-   drops below threshold), same process, same probe.
-4. **Ablation carried over** — when the GRU *does* retain, is the retained coin still
-   causally inert?
+1. **The bottleneck curve** — retention(defunct coin) vs. `d_hidden` on the mixture (headline),
+   decoded from `h_t` by position exactly as Phase 2 decoded it from `resid_post`.
+2. **The contrast** — transformer (re-reads, retains at all widths) vs. recurrent (carries,
+   drops as the state tightens), same process, same probe.
+3. **Two controls** — convergence to the loss floor (a drop only counts as minimality where
+   the task was still learned) and the **live coin** (information the model provably needs,
+   so its survival rules out "the small model is simply broken").
 
-## Results (P0–P2 complete)
+Deferred to Phase 4 (see below): the causal ablation on `h_t`, and a full belief-geometry
+probe of the carried state. Phase 3 decodes the *generator marginal* (the coin), not the
+whole belief simplex, so "belief geometry appears in a recurrent state" is **not** claimed here.
+
+## Results (P0–P3 complete)
 
 **P0 — the GRU is an optimal predictor.** At `d_hidden = 64` it reaches **0.4958 nats**
 against the epoch-aligned floor of **0.4951** (gap +0.0007) — the same floor the
@@ -110,8 +113,29 @@ recurrent nets); cite, don't claim. The contribution is the project's throughlin
 
 ## Plan
 
-- **P0** — GRU trains to the loss floor on `MixtureProcess(2,2)` (validates the substrate).
-- **P1** — probe `h_t` for belief + coin-by-position (the retention probe on the carried state).
-- **P2** — `d_hidden` sweep → the retention curve (headline).
-- **P3** — transformer-vs-recurrent contrast + ablation.
-- **3b** — a minimal state-space model (implement the recurrent scan by hand).
+- ✅ **P0** — GRU trains to the loss floor on `MixtureProcess(2,2)` (validates the substrate).
+- ✅ **P1** — probe `h_t` for belief + coin-by-position (the retention probe on the carried state).
+- ✅ **P2** — `d_hidden` sweep → the retention curve (headline).
+- ✅ **P3** — transformer-vs-recurrent contrast (`plot_bottleneck_contrast`).
+
+Phase 3 is complete as an experiment: the contrast is established, with convergence and
+live-coin controls. Two extensions are deliberately **scoped out to Phase 4** rather than
+left as gaps here — neither is needed for the claim above, and each is a separate question.
+
+## Phase 4 (scoped, not started)
+
+1. **Causal ablation in the carried state.** Phase 2 showed the transformer's retained coin
+   is causally *inert*. The same question for the GRU: where the carried state still retains
+   the defunct coin (full width), is that copy inert too — or does a bottlenecked model only
+   keep what it uses? Method ports directly (directional ablation on `h_t`, with the
+   at-the-reveal positive control).
+2. **A minimal state-space model.** Implement the recurrent scan by hand (diagonal SSM /
+   S4-lite) rather than calling `nn.GRU`, and re-run P2. Tests whether the bottleneck result
+   is a property of *carried state* in general or of the GRU's gating specifically.
+3. **Belief geometry in a carried state.** Probe `h_t` for the full belief simplex (Mess3's
+   fractal, RRXOR's distributed code) rather than just the coin — the Phase-1 replication
+   ported to a recurrent substrate.
+
+Open caveat either way: retention here is measured by a linear probe on `h_t`, so
+"forgetting" means *linearly decodable* information is gone — a nonlinear readout might
+still recover it. The ablation in (1) is the natural check.
